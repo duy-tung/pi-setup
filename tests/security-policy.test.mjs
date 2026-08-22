@@ -98,11 +98,13 @@ test("case aliases are denied when the fixture filesystem is case-insensitive", 
   }
 });
 
-test("protected project configuration is classified", () => {
+test("protected project configuration and scrub backups are classified", () => {
   const f = fixture();
   try {
     assert.equal(protectedWrite(join(f.work, ".pi", "settings.json"), f.work)?.id, "protected-write");
+    assert.equal(sensitivePath(join(f.work, ".pi", "agents", "run", "out.md.bak"))?.id, "sensitive-path");
     assert.equal(protectedWrite(join(f.work, "src", "index.ts"), f.work), undefined);
+    assert.equal(sensitivePath(join(f.work, "notes.bak")), undefined);
   } finally {
     f.cleanup();
   }

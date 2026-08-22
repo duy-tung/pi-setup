@@ -122,6 +122,10 @@ export function sensitivePath(path: string): PolicyHit | undefined {
     if (canonical === item.path) return { id: "sensitive-path", what: item.what };
   }
   const name = basename(canonical);
+  const privatePiRoot = canonicalOrMissing(join(HOME, ".pi"));
+  if (name.endsWith(".bak") && (isUnder(canonical, privatePiRoot) || canonical.includes(`${sep}.pi${sep}agents${sep}`))) {
+    return { id: "sensitive-path", what: "secret scrub backup" };
+  }
   const named = SENSITIVE_NAMES.find((item) => item.re.test(name));
   return named ? { id: "sensitive-path", what: named.what } : undefined;
 }

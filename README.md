@@ -83,10 +83,10 @@ turn.
 
 | Extension | Behavior |
 |---|---|
-| `secret-guard.ts` | Blocks credential-path access and redacts secret-shaped text before it reaches the transcript or provider |
-| `sandbox-bash.ts` | Replaces the built-in bash tool with macOS Seatbelt sandboxing, environment scrubbing, and explicit one-shot escalation |
-| `permission-gate.ts` | Requests confirmation before destructive commands, publication, force-push, or writes outside the project |
-| `spill.ts` | Spills tool output larger than 16 KiB to disk and keeps only a head/tail preview in context |
+| `permission-gate.ts` | Single pre-execution owner: canonical sensitive-path deny and exact one-call confirmation for destructive/protected/outside writes |
+| `secret-guard.ts` | Best-effort known-pattern redaction of final text tool results before the normal transcript/provider path |
+| `sandbox-bash.ts` | Per-call macOS Seatbelt confinement for Bash file writes and known credential reads, plus environment scrubbing; network remains unrestricted and there is no agent escalation |
+| `spill.ts` | Stores output larger than 16 KiB as a private redacted artifact; unsafe raw core output is withheld, never exposed as a locator |
 | `compaction-prune.ts` | Trims oversized blocks before the compaction summarizer sees them |
 | `repeat-reminder.ts` | Detects identical repeated tool calls and injects escalating loop warnings |
 | `runtime-context.ts` | Adds changing facts such as cwd, branch, dirty state, and date without invalidating the system-prompt cache |
@@ -101,9 +101,11 @@ turn.
 | `subagent.ts` | Detached Pi workers in tmux with read-only, web-only, reviewer, and implementer roles | six `agent_*` tools; `/agents` |
 | `paste-image-attach.ts` | Converts pasted or dragged image paths into actual image attachments, avoiding an extra `read` turn | automatic |
 
-`subagent.ts` deliberately separates web access from filesystem access to reduce
-exfiltration risk. Sub-agents run on the private tmux socket `piagents`, with maximum
-nesting depth 1.
+`subagent.ts` separates web and filesystem **tools** to reduce accidental egress; this is
+not process isolation. A web-researcher always uses `--no-context-files --no-approve`.
+Implementer Bash still has host network access and is intended for attended work in a
+trusted workspace. Sub-agents use the private tmux socket `piagents`, depth 1, and private
+artifact directories.
 
 ### Model and UI helpers
 
@@ -244,6 +246,23 @@ This repository deliberately excludes:
 - temporary spills and runtime logs.
 
 The repositories describe behavior. They are not backups of conversations or secrets.
+
+## Security posture and tests
+
+This is an **accident-resistant, human-supervised local setup**, not a sandbox for hostile
+repositories or prompt injection. Pi and global extensions run with the user's host
+authority. Bash network access is unrestricted; whole-process isolation is required for
+untrusted or unattended work, as documented by Pi itself.
+
+Focused policy tests use Node's built-in runner:
+
+```bash
+node --experimental-strip-types --test tests/security-policy.test.mjs
+```
+
+They cover canonical/symlink paths, one-call approvals, sensitive/protected Seatbelt
+profile generation, removal of unsandboxed escalation, safe spill fallback, and web-child
+flags. Real Seatbelt e2e must run outside an already sandboxed parent process.
 
 ## Known trade-offs
 

@@ -10,7 +10,7 @@
 set -euo pipefail
 umask 077
 
-# Mirrors REDACTIONS in extensions/secret-guard.ts — this script is the backstop
+# Mirrors REDACTIONS in extensions/lib/redact.ts — this script is the backstop
 # for output the guard never saw (user-run /bash), so a family the guard knows
 # but this list does not is a family with no coverage at all on that path.
 PATTERN='sk-ant-(oat|ort)01-[A-Za-z0-9_-]{10,}|sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}|rt\.1\.[A-Za-z0-9_-]{40,}|eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|ctx7sk-[0-9a-fA-F-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|A[KS]IA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|sk-proj-[A-Za-z0-9_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY'
