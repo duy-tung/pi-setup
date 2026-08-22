@@ -123,11 +123,12 @@ It covers ordinary tracked/untracked worktree changes, nested repositories, and 
 bounded set of explicitly edited files outside the project. Credential-shaped paths
 and sensitive directories are refused.
 
-Commands:
+User-facing commands:
 
-- `/rewind` — choose checkpoint, preview, coverage report, or undo;
-- `/checkpoint` — alias for `/rewind`;
-- `/undo` — undo the last file rewind or open the rewind menu.
+- `/tree` — navigate the conversation; tree-rewind offers to restore the matching code checkpoint;
+- `/rewind` — manage file checkpoints directly: restore code, undo the last restore, or inspect coverage.
+
+Checkpoints are automatic. There is no separate manual checkpoint command.
 
 Source changes belong in `~/Desktop/pi-tree-rewind`; the symlink makes them live after
 `/reload`. Do not replace the symlink with an unversioned copy.
