@@ -8,6 +8,7 @@
 #   ~/.pi/agent/scrub-session-secrets.sh            # scan default roots
 #   ~/.pi/agent/scrub-session-secrets.sh <path...>  # explicit files or dirs
 set -euo pipefail
+umask 077
 
 # Mirrors REDACTIONS in extensions/secret-guard.ts — this script is the backstop
 # for output the guard never saw (user-run /bash), so a family the guard knows
@@ -53,6 +54,7 @@ fi
 backups=()
 for f in "${files[@]}"; do
   cp -p "$f" "$f.bak"
+  chmod 600 "$f.bak"
   backups+=("$f.bak")
   # -0777: whole-file mode, so the PEM block rule can span lines.
   perl -0777 -pi -e '
@@ -74,6 +76,7 @@ for f in "${files[@]}"; do
 done
 
 printf '%s\n' "${backups[@]}" > "$HOME/.pi/agent/scrub-backups.txt"
+chmod 600 "$HOME/.pi/agent/scrub-backups.txt"
 
 cat <<'EOF'
 

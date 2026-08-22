@@ -17,6 +17,7 @@
  */
 import { execFile } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -64,6 +65,20 @@ const STALE_ORPHAN_MS = 2 * 60 * 60 * 1000;
 /** Cap on a collected report, so one verbose agent cannot flood the parent. */
 const MAX_REPORT_CHARS = 24_000;
 const DEPTH = Number(process.env.PI_SUBAGENT_DEPTH ?? "0");
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+/** Create a private directory and tighten an existing one as well. */
+function ensurePrivateDir(path: string): void {
+  mkdirSync(path, { recursive: true, mode: PRIVATE_DIR_MODE });
+  chmodSync(path, PRIVATE_DIR_MODE);
+}
+
+/** Write one artifact privately even when the process umask is permissive. */
+function writePrivateFile(path: string, content: string): void {
+  writeFileSync(path, content, { mode: PRIVATE_FILE_MODE });
+  chmodSync(path, PRIVATE_FILE_MODE);
+}
 
 /**
  * Wake budget (DSH tool-jobs): an idle parent is woken for a finished child at
@@ -256,7 +271,7 @@ function writeBrief(
       "Finish with a self-contained report: what you found or changed, exact file paths, and anything you could not resolve.",
     "",
   ].join("\n");
-  writeFileSync(path, body);
+  writePrivateFile(path, body);
   return path;
 }
 
@@ -519,7 +534,7 @@ type AgentRecord = {
  */
 function writeMeta(dir: string, record: AgentRecord) {
   try {
-    writeFileSync(join(dir, "meta.json"), JSON.stringify(record));
+    writePrivateFile(join(dir, "meta.json"), JSON.stringify(record));
   } catch {
     // Losing the record only costs reconciliation, never the agent itself.
   }
@@ -579,8 +594,8 @@ function registerAgent(
   sessionId: string | undefined,
 ) {
   try {
-    mkdirSync(join(homedir(), ".pi", "agent", "subagents"), { recursive: true });
-    writeFileSync(registryPath(id), JSON.stringify({ ...record, spawnedFrom, sessionId }));
+    ensurePrivateDir(join(homedir(), ".pi", "agent", "subagents"));
+    writePrivateFile(registryPath(id), JSON.stringify({ ...record, spawnedFrom, sessionId }));
   } catch {
     // Only costs reconciliation.
   }
@@ -600,7 +615,7 @@ function updateAgent(id: string, patch: Partial<AgentRecord>) {
   try {
     const path = registryPath(id);
     const current = JSON.parse(readFileSync(path, "utf-8"));
-    writeFileSync(path, JSON.stringify({ ...current, ...patch }));
+    writePrivateFile(path, JSON.stringify({ ...current, ...patch }));
   } catch {
     // No entry to update: never registered, or already collected.
   }
@@ -1086,7 +1101,7 @@ export default function (pi: ExtensionAPI) {
               .join("\n") || "(nothing recorded yet)";
           const page = join(dir, "transcript.txt");
           try {
-            writeFileSync(page, `${body}\n`);
+            writePrivateFile(page, `${body}\n`);
           } catch {
             return;
           }
@@ -1491,13 +1506,16 @@ export default function (pi: ExtensionAPI) {
       const role = params.role as Role;
       const cwd = canonical(params.cwd ?? ctx.cwd);
       const id = makeId(role, params.name);
+      const agentsRoot = join(cwd, ".pi", "agents");
       const dir = agentDir(cwd, id);
-      mkdirSync(join(dir, "sessions"), { recursive: true });
+      ensurePrivateDir(agentsRoot);
+      ensurePrivateDir(dir);
+      ensurePrivateDir(join(dir, "sessions"));
       // Session files and briefs quote source code verbatim. Nobody wants that in
       // a commit, and noticing after the fact is the expensive way to find out.
       try {
-        const marker = join(cwd, ".pi", "agents", ".gitignore");
-        if (!existsSync(marker)) writeFileSync(marker, "*\n");
+        const marker = join(agentsRoot, ".gitignore");
+        if (!existsSync(marker)) writePrivateFile(marker, "*\n");
       } catch {
         // Not worth failing a spawn over.
       }
@@ -1542,7 +1560,7 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        writeFileSync(join(dir, "output-schema.json"), JSON.stringify(schema, null, 2));
+        writePrivateFile(join(dir, "output-schema.json"), JSON.stringify(schema, null, 2));
       }
 
       const deliverable = schema
@@ -1598,6 +1616,7 @@ export default function (pi: ExtensionAPI) {
       // through every source that reads the pane.
       const statusPath = join(dir, "exit-status");
       const command =
+        "umask 077; " +
         (params.mode === "oneshot" ? `${argv.join(" ")} > ${shq(outPath)} 2>&1` : argv.join(" ")) +
         `; code=$?; echo $code > ${shq(statusPath)}; exit $code`;
 
@@ -2055,7 +2074,7 @@ export default function (pi: ExtensionAPI) {
         /* never written, or already gone */
       }
       const followup = join(dir, `followup-${Date.now().toString(36)}.md`);
-      writeFileSync(followup, params.prompt);
+      writePrivateFile(followup, params.prompt);
       const inherited = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
       const model = ROLES[role].model ?? inherited;
       const outPath = join(dir, "out.md");
