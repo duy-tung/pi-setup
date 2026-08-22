@@ -15,7 +15,7 @@ state, caches, and session logs.
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
 | Rewind source | [duy-tung/pi-tree-rewind](https://github.com/duy-tung/pi-tree-rewind) (private) |
 
-Current inventory: **16 extensions**, **7 skills**, and **5 prompt templates**.
+Current inventory: **16 extensions**, **6 skills**, and **5 prompt templates**.
 
 ## Runtime layout
 
@@ -145,7 +145,6 @@ requests them.
 | `handoff` | Compact the current session into a document another agent can continue from |
 | `subagent` | Guidance for choosing roles and using the `agent_*` extension tools |
 | `teach` | Run a stateful, multi-session learning workspace |
-| `writing-for-agents` | Write or edit skills and `AGENTS.md` effectively |
 
 The intentionally removed skills remain recoverable from git commit `937ea32`; they
 were not kept in the live setup because their triggers were too broad or because they
