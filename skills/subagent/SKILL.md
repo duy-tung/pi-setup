@@ -67,22 +67,22 @@ the rest.
 ### Roles
 
 - **`researcher`** — read-only local tools, inherits your model. Investigation and search on this machine. For bulk mechanical scans that need volume rather than judgment, pass `model: claude-haiku-4-5` explicitly — but know that cheap exploration tends to be shallow exploration.
-- **`web-researcher`** — web search + library docs, **no filesystem access**, cheap model. Anything that needs the internet.
+- **`web-researcher`** — web search + library docs, no filesystem tools or project context files, cheap model. This is tool-level least privilege, not process isolation.
 - **`reviewer`** — read-only, runs on whatever model you are running. Critique, audits.
-- **`implementer`** — full local tools + docs lookup, **no web_search**, same model as you. Actual changes.
+- **`implementer`** — full local tools + docs lookup, no `web_search` tool, same model as you. Bash still has host network access; use only for attended work in a trusted workspace.
 
-Disk access and web access never meet in one agent: a page can tell an agent to read
-a secret and send it out through a search URL, so the roles that read your disk have
-no `web_search` and the role that searches has no filesystem. If a task needs both,
-run two agents and join the results yourself.
+Filesystem and web-search TOOLS do not meet in one child. This reduces accidental
+egress, but does not isolate the process: global extension code runs with host authority,
+and implementer Bash retains network. If a task needs both tool families, run two agents
+and join the results yourself.
 
 Reviewers and implementers get a `git status` snapshot in their brief (taken at
 spawn); researchers do not — their briefs should stand on their own.
 
-A sub-agent loads project settings, skills and extensions only if the user has
-already trusted this project. In an untrusted directory it runs with global
-resources only, so it can behave differently from you — worth saying out loud if
-the project relies on its own tooling.
+A local/reviewer/implementer sub-agent loads project settings, skills and extensions
+only if the user has already trusted the project. In an untrusted directory it runs
+with global resources only. A web-researcher always uses `--no-approve` and
+`--no-context-files`, regardless of saved trust.
 
 ## Writing the brief
 

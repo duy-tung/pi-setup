@@ -173,6 +173,14 @@ test("sandbox source exposes no unsandboxed escalation path", () => {
   assert.equal(source.includes("danger-full-access"), false);
 });
 
+test("web subagent disables project trust and context files", () => {
+  const source = readFileSync(new URL("../extensions/subagent.ts", import.meta.url), "utf8");
+  assert.match(source, /role === "web-researcher"/);
+  assert.match(source, /webOnly \? "--no-approve"/);
+  assert.match(source, /webOnly \? \["--no-context-files"\]/);
+  assert.equal(source.includes("no access to this machine's files"), false);
+});
+
 test("permission gate shows exact destructive command and fails closed without UI", async () => {
   const f = fixture();
   try {
