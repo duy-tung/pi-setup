@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -190,5 +190,60 @@ test("permission gate shows exact destructive command and fails closed without U
     assert.equal(blocked.block, true);
   } finally {
     f.cleanup();
+  }
+});
+
+async function spillHandlers(home) {
+  const previous = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const handlers = {};
+    const { default: spill } = await import(`../extensions/spill.ts?test=${Date.now()}-${Math.random()}`);
+    spill({ on(name, fn) { handlers[name] = fn; } });
+    handlers.session_start();
+    return handlers;
+  } finally {
+    process.env.HOME = previous;
+  }
+}
+
+test("spill withholds oversized raw core output instead of exposing its locator", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-spill-home-"));
+  try {
+    const handlers = await spillHandlers(home);
+    const rawPath = join(home, "raw-large.txt");
+    writeFileSync(rawPath, "R".repeat(8 * 1024 * 1024 + 1));
+    const result = handlers.tool_result({
+      toolName: "bash",
+      content: [{ type: "text", text: "safe preview\n".repeat(2000) }],
+      details: { fullOutputPath: rawPath },
+    });
+    assert.match(result.content[0].text, /full text withheld/);
+    assert.equal(result.content[0].text.includes(rawPath), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("spill stores a redacted copy and removes a bounded raw core file", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-spill-home-"));
+  try {
+    const handlers = await spillHandlers(home);
+    const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const rawPath = join(home, "raw-small.txt");
+    writeFileSync(rawPath, `${token}\n${"x".repeat(20000)}`);
+    const result = handlers.tool_result({
+      toolName: "bash",
+      content: [{ type: "text", text: `${token}\n${"x".repeat(20000)}` }],
+      details: { fullOutputPath: rawPath },
+    });
+    const match = result.content[0].text.match(/full text saved to (.+?)\. Preview/);
+    assert.ok(match);
+    const stored = match[1];
+    assert.equal(readFileSync(stored, "utf8").includes(token), false);
+    assert.equal(readFileSync(stored, "utf8").includes("[REDACTED:GITHUB_TOKEN]"), true);
+    assert.equal(existsSync(rawPath), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

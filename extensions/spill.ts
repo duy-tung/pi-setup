@@ -14,10 +14,9 @@
  *     never turns it into an error;
  *   - the replacement is smaller than the budget by construction.
  *
- * Pi-specific: when core bash truncation already saved the complete output
- * (details.fullOutputPath), that file is read back, redacted, and re-spilled
- * as our own copy — core's file is raw and OS-temp, ours is scrubbed and
- * survives OS temp cleanup (so locators in resumed sessions keep working).
+ * Pi-specific: when core bash truncation saved the complete output in a raw
+ * OS-temp file, copy it only when it can be read, bounded, redacted, and stored
+ * privately. Otherwise withhold the raw locator and keep a safe inline preview.
  *
  * Security: everything spill writes (and the inline preview it emits) goes
  * through the same redaction list as secret-guard (./lib/redact), so a spill
@@ -28,15 +27,15 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { redact } from "./lib/redact";
+import { redact } from "./lib/redact.ts";
 
 const MAX_INLINE_BYTES = 16 * 1024;
 const HEAD_CHARS = 2 * 1024;
 const TAIL_CHARS = 2 * 1024;
-/** Do not copy-redact core full-output files larger than this; point at them instead. */
+/** Raw core output larger than this is withheld rather than exposed or copied. */
 const MAX_COPY_BYTES = 8 * 1024 * 1024;
 const MAX_AGE_DAYS = 7;
 
@@ -108,14 +107,18 @@ export default function (pi: ExtensionAPI) {
 			const inlineBytes = Buffer.byteLength(text, "utf8");
 
 			const writeSpill = (content: string): string | null => {
-				if (!spillDir) return null; // no session yet — leave the result alone
-				if (!created) {
-					mkdirSync(spillDir, { recursive: true, mode: 0o700 });
-					created = true;
+				if (!spillDir) return null;
+				try {
+					if (!created) {
+						mkdirSync(spillDir, { recursive: true, mode: 0o700 });
+						created = true;
+					}
+					const p = join(spillDir, `${e.toolName}-${randomBytes(4).toString("hex")}.txt`);
+					writeFileSync(p, content, { flag: "wx", mode: 0o600 });
+					return p;
+				} catch {
+					return null;
 				}
-				const p = join(spillDir, `${e.toolName}-${randomBytes(4).toString("hex")}.txt`);
-				writeFileSync(p, content, { flag: "wx", mode: 0o600 });
-				return p;
 			};
 
 			// Full-text source: when core bash truncation saved the complete output,
@@ -129,30 +132,39 @@ export default function (pi: ExtensionAPI) {
 					? (e.details as { fullOutputPath: string }).fullOutputPath
 					: undefined;
 
-			let path: string | null;
+			let path: string | null = null;
+			let fullBytes = inlineBytes;
 			if (coreFull) {
 				try {
-					path =
-						statSync(coreFull).size <= MAX_COPY_BYTES
-							? writeSpill(redact(readFileSync(coreFull, "utf8")).text)
-							: coreFull; // too big to copy — point at core's raw file
+					fullBytes = statSync(coreFull).size;
+					if (fullBytes <= MAX_COPY_BYTES) {
+						path = writeSpill(redact(readFileSync(coreFull, "utf8")).text);
+						if (path) {
+							try {
+								unlinkSync(coreFull);
+							} catch {
+								// The private redacted copy is authoritative; OS temp cleanup remains a fallback.
+							}
+						}
+					}
 				} catch {
-					path = coreFull; // unreadable — fall back to pointing at it
+					// Do not expose a raw locator when stat/read/copy fails.
 				}
 			} else {
 				path = writeSpill(text);
 			}
-			if (!path) return;
 
 			const head = headOf(text, HEAD_CHARS);
 			const tail = tailOf(text, TAIL_CHARS);
 			const omitted = inlineBytes - Buffer.byteLength(head, "utf8") - Buffer.byteLength(tail, "utf8");
+			const notice = path
+				? `[spill: output was ${fmtKiB(fullBytes)} — full text saved to ${path}. Preview below; use read or grep on that file for the rest.]`
+				: `[spill: output was ${fmtKiB(fullBytes)} — full text withheld because it could not be stored safely. Redacted inline preview below.]`;
 			const replacement = [
-				`[spill: output was ${fmtKiB(inlineBytes)} — full text saved to ${path}. ` +
-					`Preview below; use read or grep on that file for the rest.]`,
+				notice,
 				"",
 				head,
-				`[... ${fmtKiB(Math.max(omitted, 0))} omitted ...]`,
+				`[... ${fmtKiB(Math.max(omitted, 0))} omitted from inline preview ...]`,
 				tail,
 			].join("\n");
 
