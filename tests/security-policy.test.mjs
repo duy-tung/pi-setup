@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,9 +8,12 @@ import permissionGate from "../extensions/permission-gate.ts";
 import {
   isUnder,
   protectedWrite,
+  protectedWriteRules,
   resolvePolicyPath,
   sensitivePath,
+  sensitiveReadRules,
 } from "../extensions/lib/path-policy.ts";
+import { buildProfile, confine, writableRoots } from "../extensions/lib/seatbelt.ts";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "pi-policy-test-"));
@@ -145,6 +148,29 @@ test("permission gate canonicalizes normal reads and asks exactly once for outsi
     f.cleanup();
     rmSync(external, { recursive: true, force: true });
   }
+});
+
+test("Seatbelt profile shares canonical roots and adds sensitive/protected denies", () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.work, ".env"), "FAKE=1");
+    const roots = writableRoots(f.work);
+    const profile = buildProfile(roots, sensitiveReadRules(f.work), protectedWriteRules(f.work));
+    assert.match(profile, /\(deny file-write\*\)/);
+    assert.match(profile, /\(allow file-write\*/);
+    assert.match(profile, /\(deny file-read\*/);
+    assert.ok(profile.includes(join(f.work, ".env")));
+    assert.ok(profile.includes(join(f.work, ".git", "config")));
+    assert.ok(confine("printf 'x'", profile).startsWith("sandbox-exec -p "));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("sandbox source exposes no unsandboxed escalation path", () => {
+  const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
+  assert.equal(source.includes("sandbox_permissions"), false);
+  assert.equal(source.includes("danger-full-access"), false);
 });
 
 test("permission gate shows exact destructive command and fails closed without UI", async () => {

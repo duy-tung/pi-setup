@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 
@@ -13,6 +13,7 @@ export type ResolvedPolicyPath = {
 };
 
 export type PolicyHit = { id: string; what: string };
+export type PathAccessRule = { path: string; kind: "literal" | "subpath" };
 
 const SENSITIVE_TREES: { path: string; what: string }[] = [
   [".ssh", "SSH credentials"],
@@ -157,6 +158,40 @@ export function isTemporary(path: string): boolean {
 export function isUnsafeWorkspaceRoot(path: string): boolean {
   const root = canonicalOrMissing(path);
   return root === sep || root === HOME || isUnder(HOME, root);
+}
+
+export function sensitiveReadRules(workspaceRoot: string): PathAccessRule[] {
+  const rules: PathAccessRule[] = [
+    ...SENSITIVE_TREES.map((item) => ({ path: item.path, kind: "subpath" as const })),
+    ...SENSITIVE_FILES.map((item) => ({ path: item.path, kind: "literal" as const })),
+  ];
+  const root = canonicalOrMissing(workspaceRoot);
+  try {
+    for (const name of readdirSync(root)) {
+      if (SENSITIVE_NAMES.some((item) => item.re.test(name))) {
+        rules.push({ path: canonicalOrMissing(join(root, name)), kind: "literal" });
+      }
+    }
+  } catch {
+    // An unreadable workspace is handled by the Bash tool itself.
+  }
+  return rules;
+}
+
+export function protectedWriteRules(workspaceRoot: string): PathAccessRule[] {
+  const directoryNames = new Set(["extensions", "skills", "prompts"]);
+  const rules: PathAccessRule[] = GLOBAL_PROTECTED_WRITES.map((item) => ({
+    path: item.path,
+    kind: directoryNames.has(basename(item.path)) ? "subpath" : "literal",
+  }));
+  const root = canonicalOrMissing(workspaceRoot);
+  rules.push(
+    { path: canonicalOrMissing(join(root, ".pi")), kind: "subpath" },
+    { path: canonicalOrMissing(join(root, ".agents")), kind: "subpath" },
+    { path: canonicalOrMissing(join(root, ".git", "config")), kind: "literal" },
+    { path: canonicalOrMissing(join(root, ".git", "hooks")), kind: "subpath" },
+  );
+  return rules;
 }
 
 export function homePath(): string {

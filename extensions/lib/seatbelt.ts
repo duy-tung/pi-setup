@@ -13,8 +13,6 @@ import { tmpdir } from "node:os";
 
 /** Model-facing markers — one vocabulary for every sandbox outcome. */
 export const DENIAL_MARKER = "[sandbox: file access denied under workspace-write mode]";
-export const ESCALATION_HINT =
-	'[sandbox: escalation available — retry this exact command once with sandbox_permissions ("danger-full-access") + justification; the approval prompt asks the user]';
 export const RUNNER_MARKER =
 	"[sandbox: sandbox runner failed — this is a sandbox problem, not a command failure; do not rewrite the command]";
 
@@ -46,18 +44,34 @@ export function writableRoots(cwd: string, extra: string[] = []): string[] {
 	return [...new Set([canonical(cwd), canonical("/tmp"), canonical(tmpdir()), ...extra.map(canonical)])];
 }
 
-/** DSH profile shape: allow default, deny file-write* except /dev/null + roots. */
-export function buildProfile(roots: string[]): string {
-	const forms = [
-		"(version 1)",
-		"(allow default)",
-		"(deny file-write*)",
-		'(allow file-write* (literal "/dev/null"))',
-	];
-	if (roots.length > 0) {
-		forms.push(`(allow file-write* ${roots.map((r) => `(subpath ${sbplString(r)})`).join(" ")})`);
-	}
-	return forms.join("\n");
+export type SeatbeltPathRule = { path: string; kind: "literal" | "subpath" };
+
+function filter(rule: SeatbeltPathRule): string {
+  return `(${rule.kind} ${sbplString(rule.path)})`;
+}
+
+/** Allow-default profile: workspace/temp writes, then explicit sensitive denies. */
+export function buildProfile(
+  roots: string[],
+  denyReads: SeatbeltPathRule[] = [],
+  denyWrites: SeatbeltPathRule[] = [],
+): string {
+  const forms = [
+    "(version 1)",
+    "(allow default)",
+    "(deny file-write*)",
+    '(allow file-write* (literal "/dev/null"))',
+  ];
+  if (roots.length > 0) {
+    forms.push(`(allow file-write* ${roots.map((root) => `(subpath ${sbplString(root)})`).join(" ")})`);
+  }
+  if (denyWrites.length > 0) {
+    forms.push(`(deny file-write* ${denyWrites.map(filter).join(" ")})`);
+  }
+  if (denyReads.length > 0) {
+    forms.push(`(deny file-read* ${denyReads.map(filter).join(" ")})`);
+  }
+  return forms.join("\n");
 }
 
 /** Wrap a bash command so it runs confined under the given profile. */
