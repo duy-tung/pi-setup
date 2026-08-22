@@ -64,10 +64,6 @@ Pi discovers files under `extensions/`, `skills/`, and `prompts/` automatically.
 | `pi-anthropic-oauth` | Anthropic OAuth/provider integration |
 | `pi-web-search` | Web search tools |
 | `@upstash/context7-pi` | Documentation lookup through Context7 |
-| `~/repos/pi-deepseek-harness` | Local DeepSeek provider matching DSH credential and wire behavior |
-
-The DeepSeek provider is installed but is not in the current `enabledModels` list.
-Its source and setup notes live in `~/repos/pi-deepseek-harness`.
 
 ## Extensions
 
@@ -226,8 +222,7 @@ ln -s ~/Desktop/pi-tree-rewind/src ~/.pi/agent/extensions/tree-rewind
 ```
 
 The absolute mise/npm path in `settings.json` assumes the same home directory and may
-need adjustment on another account. The local `../../repos/pi-deepseek-harness` package
-must also exist or be removed from `packages`.
+need adjustment on another account.
 
 Run `pi list`, open a short session, and use `/reload` after changing extensions.
 

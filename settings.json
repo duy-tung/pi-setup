@@ -48,7 +48,6 @@
   "packages": [
     "npm:pi-anthropic-oauth",
     "npm:pi-web-search",
-    "npm:@upstash/context7-pi",
-    "../../repos/pi-deepseek-harness"
+    "npm:@upstash/context7-pi"
   ]
 }
