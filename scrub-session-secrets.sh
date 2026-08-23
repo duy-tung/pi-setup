@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Redact credentials accidentally printed into pi session transcripts.
 #
-# Run AFTER quitting pi: an interactive sub-agent left running on the piagents
-# socket keeps appending to its own session file, and scrubbing under it loses
-# whatever it writes next.
+# Run AFTER quitting Pi. RPC subagents are session-scoped and shut down with
+# their parent, so this avoids racing any transcript writer.
 #
 #   ~/.pi/agent/scrub-session-secrets.sh            # scan default roots
 #   ~/.pi/agent/scrub-session-secrets.sh <path...>  # explicit files or dirs
@@ -15,21 +14,12 @@ umask 077
 # but this list does not is a family with no coverage at all on that path.
 PATTERN='sk-ant-(oat|ort)01-[A-Za-z0-9_-]{10,}|sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}|rt\.1\.[A-Za-z0-9_-]{40,}|eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|ctx7sk-[0-9a-fA-F-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|A[KS]IA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|sk-proj-[A-Za-z0-9_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY'
 
-if command -v tmux >/dev/null && tmux -L piagents ls >/dev/null 2>&1; then
-  echo "WARNING: sub-agents are still alive on the piagents socket:"
-  tmux -L piagents ls 2>/dev/null | sed 's/^/  /'
-  echo "They may still be writing session files. Kill them first:"
-  echo "  tmux -L piagents kill-server"
-  read -r -p "Continue anyway? [y/N] " reply
-  [[ ${reply:-n} == [yY] ]] || exit 1
-fi
-
 roots=()
 if [[ $# -gt 0 ]]; then
   roots=("$@")
 else
-  # Sub-agent sessions live in <project>/.pi/agents/<id>/sessions, so a repo the
-  # agent ran in holds transcripts that ~/.pi never sees.
+  # RPC v2 sessions live under ~/.pi. Keep scanning project .pi directories as
+  # well because legacy tmux-era subagent transcripts may still exist there.
   roots+=("$HOME/.pi")
   while IFS= read -r d; do roots+=("$d"); done < <(
     find "$HOME" -maxdepth 8 -type d -name ".pi" \

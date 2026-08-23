@@ -10,7 +10,7 @@ state, caches, and session logs.
 |---|---|
 | Pi | `@earendil-works/pi-coding-agent` 0.84.2 |
 | Node | 24.15.0, managed by mise |
-| tmux | 3.6a; used by sub-agents |
+| Subagent transport | Native Pi RPC (`--mode rpc`) |
 | Live config | `~/.pi/agent/` |
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
 | Rewind source | [duy-tung/pi-tree-rewind](https://github.com/duy-tung/pi-tree-rewind) (private) |
@@ -28,8 +28,9 @@ Current inventory: **16 extensions**, **6 skills**, and **5 prompt templates**.
 ├── skills/                   capabilities loaded on demand
 ├── prompts/                  explicit slash-command templates
 ├── sessions/                 local session logs (not tracked)
+├── subagents/                private RPC child sessions (not tracked)
 ├── auth.json                 provider credentials (not tracked)
-└── cache/, npm/, trust.json  runtime data (not tracked)
+└── cache/, npm/, git/, trust.json  runtime data (not tracked)
 ```
 
 Pi discovers files under `extensions/`, `skills/`, and `prompts/` automatically.
@@ -56,6 +57,7 @@ after its authority and trust-boundary findings were fixed.
 `settings.json` currently selects:
 
 - default provider/model: Anthropic, `claude-fable-5`;
+- Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.1`;
 - default thinking: `xhigh`;
 - enabled model families: Claude Fable/Opus/Sonnet/Haiku and
   `openai-codex/gpt-5.6-*`;
@@ -69,9 +71,28 @@ after its authority and trust-boundary findings were fixed.
 
 | Package | Purpose |
 |---|---|
-| `pi-anthropic-oauth` | Anthropic OAuth/provider integration |
+| `pi-anthropic-oauth-plus@v0.3.1` (pinned Git) | Anthropic OAuth plus 1-hour prompt cache and bounded keepalive |
 | `pi-web-search` | Web search tools |
 | `@upstash/context7-pi` | Documentation lookup through Context7 |
+
+### Anthropic prompt-cache policy
+
+`PI_CACHE_RETENTION=long` selects Anthropic's 1-hour cache. The pinned provider
+replays the exact last successful request every 55 minutes only for prompts of at
+least 10K tokens. Six confirmed cache-read pings can keep one live conversation
+eligible for about 390 minutes from the real request start. A real request, reload,
+session switch, shutdown, expiry, provider error, or zero cache read cancels the
+chain; stale completions cannot rearm it.
+
+The pings are out of band, so their usage is absent from Pi's session/footer cost.
+Sleep, process restart, provider eviction, and gaps beyond 6.5 hours can still miss.
+Use `/compact`, a handoff, or a new session for overnight breaks instead of warming
+cache indefinitely. Pi's `Cache miss after … idle` label compares visible request
+timestamps and does not account for hidden keepalive pings.
+
+The provider's aggressive OAuth identity rewrite may turn `~/.pi/agent` into
+`~/.Claude Code/agent`. New installations create only that narrow agent-directory
+alias; an existing legacy whole-`~/.pi` alias is not silently changed.
 
 ## Extensions
 
@@ -98,28 +119,43 @@ turn.
 | `ask-user.ts` | Structured multiple-choice/input questions for the human | model tool `ask_user` |
 | `todos.ts` | Model-managed task checklist with a TUI widget | tool `todowrite`, `/todos` |
 | `goal.ts` | Event-sourced long-running goals with autonomous continuation rounds | tools `create_goal`, `get_goal`, `update_goal`; `/goal` |
-| `subagent.ts` | Detached Pi workers in tmux with read-only, web-only, reviewer, and implementer roles | six `agent_*` tools; `/agents` |
+| `subagent.ts` | Resumable Pi RPC children with parent-scoped state and explore, web, and work profiles | tools `subagent`, `send_message`, `list_agents`, `interrupt_agent`; `/agents` |
 | `paste-image-attach.ts` | Converts pasted or dragged image paths into actual image attachments, avoiding an extra `read` turn | automatic |
 
-`subagent.ts` separates web and filesystem **tools** to reduce accidental egress; this is
-not process isolation. A web-researcher always uses `--no-context-files --no-approve`.
-Implementer Bash still has host network access and is intended for attended work in a
-trusted workspace. Sub-agents use the private tmux socket `piagents`, depth 1, and private
-artifact directories.
+`subagent.ts` uses Pi's native RPC protocol. A child process exists only for one active
+turn; its durable session remains under
+`~/.pi/agent/subagents/<parent-session-id>/<child-id>/` for `send_message` follow-ups.
+Background completion is delivered automatically, while `/agents` exposes the private
+transcript and human steering. Child IDs are authorized to their exact parent session;
+per-child control is serialized across settlement/cold-resume boundaries, and there is no
+cwd override, orphan adoption, nesting, or polling tool.
+
+Every child uses `--no-approve`, so project-controlled extensions and context cannot shadow
+an allowed built-in tool name. The `web` profile additionally uses `--no-context-files` and
+has no filesystem tools. The `work` profile still requires the parent to be in a trusted,
+non-broad workspace, but the standalone child prompt must carry the relevant project rules;
+its Bash retains host network access. These are model-tool restrictions and accident
+resistance, not process isolation. RPC dialogs fail closed, reports are
+redacted/marked/capped before entering parent context, and active children stop on every
+parent session shutdown.
 
 ### Model and UI helpers
 
 | Extension | Behavior | User surface |
 |---|---|---|
-| `present.ts` | Rewrites assistant answers longer than 200 prose characters through `openai-codex/gpt-5.6-sol:off` and appends a display-only plain-language version | automatic; `/present on\|off` |
+| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:off`; appends a display-only plain-language version | default off; `/present on\|off` |
 | `fast-mode.ts` | Adds Anthropic `speed: "fast"` for supported Opus models | `/fast` |
 | `statusline.ts` | Shows cwd, git branch, model, effort, context, cost, and Anthropic 5-hour/7-day limits | footer; `/limits` |
 
 `present.ts` is a Pi port of the display-only and fail-open design from
-[claudish-to-english](https://github.com/gvzdv/claudish-to-english). It runs the exact
-Pi executable that launched the current session, disables reasoning for the rewrite,
-and performs the request in the background. The original answer remains authoritative;
-a failed or timed-out rewrite shows nothing.
+[claudish-to-english](https://github.com/gvzdv/claudish-to-english). After `/present on`, a
+private one-shot `--mode rpc --no-session` child uses the exact Pi executable and fixed
+`openai-codex/gpt-5.6-sol:off` model with no tools, project resources, or durable child
+session. The answer travels over RPC stdin rather than a plaintext prompt file. Session/leaf
+generation guards, latest-wins cancellation, fenced-code validation, bounded output, and
+process-group teardown prevent stale rewrites from attaching to another turn. The custom
+entry shows per-rewrite model/token/cost metadata but does not add that usage to parent
+session totals. The original answer remains authoritative; any failure shows nothing.
 
 ### Workspace rewind
 
@@ -150,11 +186,11 @@ requests them.
 
 | Skill | Use case |
 |---|---|
-| `code-review` | Review changes since a ref along Standards and Spec axes using parallel reviewer sub-agents |
+| `code-review` | Review changes since a ref along Standards and Spec axes using parallel foreground `explore` children |
 | `domain-modeling` | Sharpen project terminology, maintain `CONTEXT.md`, and record gated ADRs |
 | `grilling` | Stress-test the user's plan or decision through a design-tree interview |
 | `handoff` | Compact the current session into a document another agent can continue from |
-| `subagent` | Guidance for choosing roles and using the `agent_*` extension tools |
+| `subagent` | Guidance for RPC profiles, background scheduling, continuation, and the four subagent controls |
 | `teach` | Run a stateful, multi-session learning workspace |
 
 The intentionally removed skills remain recoverable from git commit `937ea32`; they
@@ -181,8 +217,8 @@ requests.
 3. Watch assumptions, destructive-action confirmations, and the todo widget while Pi
    works.
 4. Use `/review` before merging non-trivial changes.
-5. Use `/wait-what` when an explanation does not land; long answers also receive the
-   automatic GPT presentation layer.
+5. Use `/wait-what` when an explanation does not land. Enable `/present on` only when
+   sending future long answers to OpenAI for a display-only rewrite is acceptable.
 6. Use `/handoff` before stopping an unfinished task.
 7. Use `/rewind` only after previewing the restore plan.
 
@@ -198,7 +234,6 @@ rsync -a --delete --links ~/.pi/agent/skills/ skills/
 rsync -a --delete --links ~/.pi/agent/extensions/ extensions/
 cp ~/.pi/agent/AGENTS.md AGENTS.md
 cp ~/.pi/agent/settings.json settings.json
-cp ~/.pi/agent/subagent.tmux.conf subagent.tmux.conf
 git add -A
 git diff --cached --stat
 ```
@@ -216,14 +251,16 @@ git push
 
 ## Restore on a new machine
 
-Prerequisites: Node through mise, Pi, tmux, git, and nvim.
+Prerequisites: Node through mise, Pi, git, and nvim.
 
 ```bash
 # Main configuration
 git clone https://github.com/duy-tung/pi-setup.git ~/repos/pi-setup
 mkdir -p ~/.pi/agent
 cd ~/repos/pi-setup
-rsync -a extensions skills prompts AGENTS.md settings.json subagent.tmux.conf ~/.pi/agent/
+rsync -a extensions skills prompts AGENTS.md settings.json ~/.pi/agent/
+export PI_CACHE_RETENTION=long  # also persist this in your shell startup file
+pi update --extensions         # installs the pinned OAuth fork and other packages
 
 # Rewind extension (private repository; authenticate with GitHub first)
 git clone https://github.com/duy-tung/pi-tree-rewind.git ~/Desktop/pi-tree-rewind
@@ -242,7 +279,7 @@ This repository deliberately excludes:
 
 - `auth.json` and provider credentials;
 - `sessions/`, sub-agent sessions, and rewind stores;
-- `trust.json`, caches, package installation state, and model catalogs;
+- `trust.json`, caches, npm/git package installation state, and model catalogs;
 - temporary spills and runtime logs.
 
 The repositories describe behavior. They are not backups of conversations or secrets.
@@ -257,19 +294,24 @@ untrusted or unattended work, as documented by Pi itself.
 Focused policy tests use Node's built-in runner:
 
 ```bash
-node --experimental-strip-types --test tests/security-policy.test.mjs
+node --experimental-strip-types --test tests/*.test.mjs
 ```
 
-They cover canonical/symlink paths, one-call approvals, sensitive/protected Seatbelt
-profile generation, removal of unsandboxed escalation, safe spill fallback, and web-child
-flags. Real Seatbelt e2e must run outside an already sandboxed parent process.
+They cover canonical/symlink paths, one-call approvals, Seatbelt profile generation,
+safe spill fallback, RPC framing/dialog/process teardown, parent-scoped durable child
+state, fixed capability profiles, bounded/redacted child reports, and private presentation
+RPC eligibility/ownership/cancellation/fenced-code behavior. Real Seatbelt e2e must run
+outside an already sandboxed parent process.
 
 ## Known trade-offs
 
 - `ask-user.ts`, `todos.ts`, `goal.ts`, and `subagent.ts` register model tools, so their
   schemas consume context on every turn even when unused.
-- `present.ts` adds one GPT request for each sufficiently long assistant answer; turn it
-  off with `/present off` when latency or usage matters.
+- After `/present on`, `present.ts` sends each eligible long answer to OpenAI in a private
+  ephemeral RPC call. Its per-rewrite cost is displayed but not added to parent totals; the
+  feature resets to off on every session start/reload.
+- Anthropic cache keepalive can make up to six hidden cache-read requests per idle live
+  conversation; those requests are bounded but absent from Pi's displayed session cost.
 - `tree-rewind` spends disk I/O on automatic checkpoints but does not consume model
   context. Always inspect its coverage report for paths it cannot protect.
 - `paste-image-attach.ts` touches a private TUI paste path and should be checked after Pi

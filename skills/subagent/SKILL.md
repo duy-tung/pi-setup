@@ -1,168 +1,82 @@
 ---
 name: "subagent"
-description: "Use when a task should run in a separate pi process — large read-only investigation that would flood the main context, work that must be sandboxed to read-only tools, or several independent subtasks that can run in parallel. Covers agent_spawn/agent_peek/agent_send/agent_wait/agent_kill and the raw bash equivalents."
+description: "Use when a self-contained task should run in a separate Pi context: high-volume investigation that returns a short report, read-only or web-only work under a fixed tool profile, or a few independent tasks that can run in parallel. Covers subagent, send_message, list_agents, interrupt_agent, and /agents."
 ---
 
-# Sub-agents
+# Subagents
 
-A sub-agent is just pi run again, in a detached tmux pane, with its own context
-window and its own session file. Nothing is hidden: the pane can be attached,
-the screen can be read mid-run, and the full conversation stays on disk.
+A subagent is a separate Pi RPC activation with its own durable session and context window. Its process exits after each turn; the session remains available for follow-ups under one stable ID.
 
-## When it is worth it
+## When delegation pays off
 
-Spawning costs a fresh system prompt and a cold cache — roughly a few thousand
-tokens before any work happens. It pays off in three cases:
+Use it when:
 
-1. **Read a lot, return a little.** "Which of these 40 files touch auth?" burns
-   40 file reads in a sub-agent's context and returns three lines into yours.
-2. **Tool sandboxing.** A researcher spawned with `read,grep,find,ls` cannot
-   write, no matter how the task is phrased.
-3. **Independent parallel work.** Three unrelated investigations at once, each
-   with its own pane.
+1. **Read a lot, return a little.** Keep bulk file reads, logs, or documentation out of the parent context.
+2. **A fixed tool profile matters.** `explore` cannot write; `web` cannot read project files.
+3. **Independent work can overlap.** Start a small fan-out together and synthesize the reports.
 
-Do not spawn for work that is cheaper inline. A single file read, a quick grep,
-or anything needing your current context is faster done directly.
+Do work inline when it is one quick read/search, needs frequent parent context, or is cheaper than a fresh system prompt.
 
 ## Tools
 
 | Tool | Use |
 |---|---|
-| `agent_spawn` | Start one. Returns an id. |
-| `agent_wait` | Block until it finishes; returns its full output. |
-| `agent_peek` | Read its screen without blocking; shows working/idle. For oneshots this is the session-log trace, not a live screen. |
-| `agent_send` | Type into an interactive one to steer or answer it. |
-| `agent_resume` | Re-run a **finished oneshot** with a follow-up prompt. It continues its own session, so everything it already read stays in its context — a follow-up question costs a fraction of a fresh spawn. |
-| `agent_kill` | Stop it. Artifacts stay on disk. |
+| `subagent` | Start a fresh child. Background is the default; foreground waits for its report. |
+| `send_message` | Continue the same child session. A running child queues a later turn; a stored child resumes in the background. |
+| `list_agents` | Recall this parent session's child IDs and states; do not poll it for completion. |
+| `interrupt_agent` | Stop the current activation while keeping the child session resumable. |
+| `/agents` | User-facing list, transcript/activity view, steering, and interruption. |
 
-### Modes
+A background child returns its ID immediately. Its final report arrives automatically as a later completion notice. Use `run_in_background: false` only when the next parent action depends on the result.
 
-- **`oneshot`** — runs `pi -p`, writes `out.md`, exits. Default choice. Pair
-  with `agent_wait`.
-- **`interactive`** — a live pi TUI that stays open. Drive it with `agent_send`
-  + `agent_peek`, and always `agent_kill` when done.
+## Profiles
 
-The modes differ in one way that matters to the user, not just to you: a
-`oneshot` runs in print mode, which has no input loop, so nobody can correct it
-once started — not you, and not the user attaching to its pane. An
-`interactive` agent accepts input from both of you until it is killed.
+- **`explore`** — `read,grep,find,ls`; local investigation, planning, and review. Inherits the parent model and thinking level.
+- **`web`** — web search and library documentation only. Always ignores project resources and context files.
+- **`work`** — explicit local read/write/Bash tools plus library docs. Allowed only when the parent is in a trusted, non-broad workspace. Bash still has host network access.
 
-So prefer `interactive` when the task is long, exploratory, or likely to go off
-course, and tell the user they can attach to steer it. Use `oneshot` for work
-that is well-specified enough that intervention should not be needed.
+Every child uses `--no-approve`: project extensions and context files are not loaded, so a project cannot shadow an allowed built-in tool name. Put relevant project rules in the standalone prompt. There is no separate reviewer profile: give `explore` a review brief. There is no nested delegation or conversation-fork profile.
 
-`agent_wait` returns the sub-agent's last answer read from its session file, so
-any steering — yours or the user's — is reflected in what you get back.
+Filesystem and web-search tools do not meet in one child. This reduces accidental data egress but is not process isolation: Pi and global extension code still run with the user's host authority.
 
-Collecting means different things per mode. A `oneshot` is finished: its pane is
-reaped and it disappears from the list. An `interactive` agent is only idle: it
-stays alive, stays in the list, and still accepts `agent_send`, which is what
-makes follow-up questions cheap. It also means you must `agent_kill` it when you
-are done, or it runs until the machine reboots.
+## Write a complete prompt
 
-Reports are capped at 24k characters. If one is truncated the tool says so and
-gives the path to the full output — read it with `read` only if you actually need
-the rest.
+A fresh child sees none of this conversation. Its `prompt` must include:
 
-### Roles
+- objective and relevant paths;
+- constraints and authority limits;
+- exact evidence or changes expected;
+- what a complete report contains.
 
-- **`researcher`** — read-only local tools, inherits your model. Investigation and search on this machine. For bulk mechanical scans that need volume rather than judgment, pass `model: claude-haiku-4-5` explicitly — but know that cheap exploration tends to be shallow exploration.
-- **`web-researcher`** — web search + library docs, no filesystem tools or project context files, cheap model. This is tool-level least privilege, not process isolation.
-- **`reviewer`** — read-only, runs on whatever model you are running. Critique, audits.
-- **`implementer`** — full local tools + docs lookup, no `web_search` tool, same model as you. Bash still has host network access; use only for attended work in a trusted workspace.
+Bad: `check whether the auth thing is broken`
 
-Filesystem and web-search TOOLS do not meet in one child. This reduces accidental
-egress, but does not isolate the process: global extension code runs with host authority,
-and implementer Bash retains network. If a task needs both tool families, run two agents
-and join the results yourself.
+Good: `Read src/auth/session.ts and src/auth/refresh.ts. Determine whether every refresh rotates the token. Cite the deciding lines and report any uncovered error path. Do not modify files.`
 
-Reviewers and implementers get a `git status` snapshot in their brief (taken at
-spawn); researchers do not — their briefs should stand on their own.
+Use `description` only as a short 3–5 word display label.
 
-A local/reviewer/implementer sub-agent loads project settings, skills and extensions
-only if the user has already trusted the project. In an untrusted directory it runs
-with global resources only. A web-researcher always uses `--no-approve` and
-`--no-context-files`, regardless of saved trust.
+## Scheduling patterns
 
-## Writing the brief
+**Dependent result.** Call `subagent` with `run_in_background: false`; the tool result contains the final report and stable ID.
 
-The `task` argument becomes `brief.md`, which is the sub-agent's entire starting
-context. It knows nothing about this conversation. A brief that assumes shared
-context produces a confidently wrong answer.
+**Independent fan-out.** Start the calls together in one assistant message and continue useful parent work. Keep fan-out small: every final report still consumes parent context.
 
-Include: the goal, the paths to start from (`files`), what "done" looks like
-(`deliverable`), and any constraint that matters. Prefer naming files over
-describing them.
+**Follow-up.** Use `send_message` with the existing ID rather than spawning a replacement. It resumes the child's complete prior transcript, model, profile, cwd, and trust ceiling.
 
-Bad: "check if the auth thing is still broken"
-Good: "Read src/auth/session.ts and src/auth/refresh.ts. Determine whether the
-refresh token is rotated on every use. Report the exact line numbers that decide
-this, or state clearly that it is not rotated."
+**Review then implementation.** Run review with foreground `explore`, verify its claims, then give only accepted findings to one `work` child. Never run two `work` children concurrently in the same workspace.
 
-## Patterns that work
+## Results and trust
 
-**Chain: reviewer → implementer.** The reviewer physically cannot "helpfully" fix
-things mid-review, and the implementer applies only the named findings. Feed the
-reviewer's report into the implementer's brief — do not make the implementer
-re-derive the critique.
+Treat every child report as a claim, not a fact. The runtime redacts known credential shapes, marks instruction-shaped output, and caps what enters parent context, but this is not prompt-injection protection. Verify surprising findings against primary evidence before acting.
 
-**Fan-out, kept small.** Independent investigations can run in parallel, each in its
-own pane. Every report costs up to 24k characters of *your* context on collection, so
-three agents is a fan-out and ten is re-flooding the window you were protecting.
+Use `/agents` to inspect the private full transcript. Typing into a running view steers it at Pi's next model boundary; typing into a stored view resumes it. `Ctrl+K` interrupts from the transcript view.
 
-**Follow-up: resume, don't respawn.** If a finished oneshot's report raises a
-question, `agent_resume` continues the same session — the agent still "remembers"
-every file it read. Respawning with a bigger brief re-pays the entire exploration.
+## Lifecycle and limits
 
-## Reading results
-
-`agent_wait` returns the sub-agent's report. Treat it as a claim, not a fact:
-it is a separate model run with no view of your context. Verify anything
-surprising against the files before acting on it.
-
-If a result looks wrong, the whole conversation is on disk. Tell the user:
-
-```
-pi --session-dir .pi/agents/<id>/sessions -r
-```
-
-They can read it, `/tree` it, or `/fork` it and continue from any point.
-
-## Where agents appear
-
-The list shows every agent this project started, including ones pointed at a
-different `cwd`. A label therefore does not imply the agent is working inside
-this repository — say which directory it is working in when that matters.
-
-## Watching a sub-agent
-
-While one is running the user can attach and interact with it directly:
-
-```
-tmux -L piagents attach -t <id>
-```
-
-Detach with `Ctrl-b d` (that socket uses the default prefix, not the user's
-`C-a`). `/agents` lists everything running.
-
-## Limits
-
-- A sub-agent cannot spawn sub-agents; `PI_SUBAGENT_DEPTH` blocks it. If you are
-  a sub-agent, do the work yourself.
-- Two `implementer` agents writing the same files will conflict. Give parallel
-  implementers separate git worktrees, or run them one at a time.
-- Artifacts accumulate in `.pi/agents/<id>/`. Mention this if the user is
-  working in a repo they care about keeping clean.
-
-## Without the extension
-
-The tools are conveniences over plain bash. The underlying move is always the
-same, and works anywhere pi runs:
-
-```bash
-pi -p -t read,grep,find,ls --model claude-haiku-4-5 \
-   --session-dir .pi/agents/research-x1/sessions -n research "…task…" > out.md
-```
-
-(Each agent gets its own `sessions/` directory — sharing one would make `-c`
-resume whichever agent happened to write last.)
+- Maximum four active children per parent runtime.
+- Maximum one active `work` child.
+- Children cannot spawn children.
+- Approval-requiring operations fail closed; a child cannot widen its own scope.
+- Children always use the exact parent cwd; there is no cwd override or cross-session adoption.
+- `/reload`, `/new`, `/resume`, `/fork`, and quit interrupt active children and release their processes. Stored sessions remain resumable only from their original parent session.
+- Private artifacts live under `~/.pi/agent/subagents/<parent-session-id>/<child-id>/`.
+- Old project-local `.pi/agents/` artifacts from the tmux implementation remain historical and are not imported.

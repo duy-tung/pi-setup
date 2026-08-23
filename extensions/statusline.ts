@@ -116,7 +116,7 @@ const touch = () => {
 
 // ---------------------------------------------------------------- polling
 async function poll(ctx: any, force = false) {
-	if (!ctx.hasUI) return; // sub-agents run in print mode: no footer, no request
+	if (ctx.mode !== "tui") return; // RPC/print children have no terminal footer and must not poll usage
 	if (!force && Date.now() < nextAttempt) return;
 	if (!force && Date.now() - lastPoll < MIN_POLL_MS) return;
 	try {
@@ -333,6 +333,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_e, ctx) => {
+		if (ctx.mode !== "tui") return;
 		ctxPct = readPct(ctx);
 		// A resumed session has already spent money; starting at zero would report the
 		// wrong number until the first turn happened to end.

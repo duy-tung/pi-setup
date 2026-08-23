@@ -29,7 +29,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-/** Sub-agent panes have a UI nobody watches — treat them as non-interactive. */
+/** Delegated RPC subagents have no human dialog channel — fail closed. */
 const IS_SUBAGENT = Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;
 
 const FREE_TEXT = "✏️  Type a different answer";

@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 - **Standards** — does the code conform to this repo's documented coding standards?
 - **Spec** — does the code faithfully implement the originating issue / spec?
 
-Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings. Use the pi subagent skill (/Users/tung/.pi/agent/skills/subagent/SKILL.md): spawn each axis as a read-only `reviewer` role via `agent_spawn` (mode `oneshot`), then collect both reports with `agent_wait`.
+Both axes run as **parallel subagents** so they do not pollute each other's context, then this skill aggregates their findings. Use the Pi subagent skill (`/Users/tung/.pi/agent/skills/subagent/SKILL.md`): issue both `subagent` calls together with profile `explore` and `run_in_background: false`. Pi executes the independent tool calls concurrently and returns both reports in the same parent step.
 
 Ask the user where the spec/requirements live (issue tracker, spec file, ticket). If there is none, review the Standards axis only and note the Spec axis was skipped.
 
@@ -55,9 +55,9 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 - **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the real target direct.
 - **Refused Bequest** — a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
 
-### 4. Spawn both sub-agents in parallel
+### 4. Start both subagents in parallel
 
-Spawn both with `agent_spawn` (role `reviewer`, mode `oneshot`) in the same block so they run in parallel, then collect each with `agent_wait`. The `reviewer` role is read-only, so neither agent can "helpfully" fix what it finds. Each `task` brief must be self-contained — the sub-agent sees none of this conversation.
+Issue both `subagent` calls in the same assistant message with profile `explore` and `run_in_background: false`. The fixed profile is read-only, so neither child can "helpfully" fix what it finds. Each `prompt` must be self-contained because a fresh child sees none of this conversation. Use a short axis name as `description`.
 
 **Standards sub-agent brief** — include:
 

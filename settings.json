@@ -46,7 +46,7 @@
   "lastChangelogVersion": "0.84.2",
   "defaultModel": "claude-fable-5",
   "packages": [
-    "npm:pi-anthropic-oauth",
+    "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",
     "npm:pi-web-search",
     "npm:@upstash/context7-pi"
   ]

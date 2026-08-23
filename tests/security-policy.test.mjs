@@ -175,12 +175,41 @@ test("sandbox source exposes no unsandboxed escalation path", () => {
   assert.equal(source.includes("danger-full-access"), false);
 });
 
-test("web subagent disables project trust and context files", () => {
+test("RPC subagent has no tmux, cwd override, or legacy control surface", () => {
   const source = readFileSync(new URL("../extensions/subagent.ts", import.meta.url), "utf8");
-  assert.match(source, /role === "web-researcher"/);
-  assert.match(source, /webOnly \? "--no-approve"/);
-  assert.match(source, /webOnly \? \["--no-context-files"\]/);
-  assert.equal(source.includes("no access to this machine's files"), false);
+  assert.match(source, /ManagedRpcChild/);
+  assert.match(source, /name: "subagent"/);
+  assert.match(source, /name: "send_message"/);
+  assert.match(source, /name: "list_agents"/);
+  assert.match(source, /name: "interrupt_agent"/);
+  assert.equal(source.includes("tmux"), false);
+  assert.equal(source.includes("agent_spawn"), false);
+  assert.equal(source.includes("agent_wait"), false);
+  assert.equal(source.includes("output_schema"), false);
+  assert.equal(source.includes("cwd: Type.Optional"), false);
+  assert.ok(source.indexOf("await rpc.prompt(prompt)") < source.indexOf("active.set(record.id, activeChild)"));
+  assert.match(source, /withChildControl/);
+  assert.match(source, /setImmediate/);
+  assert.match(source, /if \(!live\.settled\) return "queued"/);
+  assert.match(source, /markInterruption/);
+  assert.match(source, /void settlement\.catch\(\(\) => \{\}\)/);
+  assert.match(source, /finalizePromise\.catch\(\(\) => \{\}\)/);
+
+  const statusline = readFileSync(new URL("../extensions/statusline.ts", import.meta.url), "utf8");
+  assert.match(statusline, /ctx\.mode !== "tui"/);
+
+  const present = readFileSync(new URL("../extensions/present.ts", import.meta.url), "utf8");
+  assert.match(present, /ManagedRpcChild/);
+  assert.match(present, /let enabled = false/);
+  assert.match(present, /ctx\.mode !== "tui"/);
+  assert.match(present, /--mode", "rpc"/);
+  assert.match(present, /--no-session/);
+  assert.match(present, /--no-tools/);
+  assert.match(present, /--no-extensions/);
+  assert.match(present, /PRESENT_MODEL = "openai-codex\/gpt-5\.6-sol:off"/);
+  assert.match(present, /void settlement\.catch\(\(\) => \{\}\)/);
+  assert.equal(present.includes("execFile"), false);
+  assert.equal(present.includes("pi.sendMessage"), false);
 });
 
 test("permission gate shows exact destructive command and fails closed without UI", async () => {
