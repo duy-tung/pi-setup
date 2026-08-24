@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 - **Standards** — does the code conform to this repo's documented coding standards?
 - **Spec** — does the code faithfully implement the originating issue / spec?
 
-Both axes run as **parallel subagents** so they do not pollute each other's context, then this skill aggregates their findings. Use the Pi subagent skill (`/Users/tung/.pi/agent/skills/subagent/SKILL.md`): issue both `subagent` calls together with profile `explore` and `run_in_background: false`. Pi executes the independent tool calls concurrently and returns both reports in the same parent step.
+Both axes run as **parallel subagents** so they do not pollute each other's context, then this skill aggregates their findings. Use the Pi subagent skill (`~/.pi/agent/skills/subagent/SKILL.md`): issue both `subagent` calls together with profile `explore` and `run_in_background: false`. Pi executes the independent tool calls concurrently and returns both reports in the same parent step.
 
 Ask the user where the spec/requirements live (issue tracker, spec file, ticket). If there is none, review the Standards axis only and note the Spec axis was skipped.
 

@@ -2,7 +2,7 @@
 description: Start or continue a multi-session learning workspace in the current directory
 argument-hint: "[topic]"
 ---
-Read and apply /Users/tung/.pi/agent/skills/teach/SKILL.md.
+Read and apply ~/.pi/agent/skills/teach/SKILL.md.
 
 Topic: ${@:-continue from the existing workspace state (MISSION.md, learning-records/)}
 

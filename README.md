@@ -1,8 +1,8 @@
-# Pi setup on this machine
+# Portable Pi setup for macOS
 
-Personal configuration for the [Pi coding agent](https://github.com/badlogic/pi-mono).
-This repository mirrors the live setup under `~/.pi/agent/`, except secrets, runtime
-state, caches, and session logs.
+Personal configuration and bootstrap for the [Pi coding agent](https://github.com/badlogic/pi-mono).
+This private repository is the source of truth for six managed resources under
+`~/.pi/agent/`; credentials, runtime state, caches, and session logs stay local.
 
 ## Current snapshot
 
@@ -13,9 +13,40 @@ state, caches, and session logs.
 | Subagent transport | Native Pi RPC (`--mode rpc`) |
 | Live config | `~/.pi/agent/` |
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
-| Rewind source | [duy-tung/pi-tree-rewind](https://github.com/duy-tung/pi-tree-rewind) (private) |
+| Rewind source | Bundled package under `extensions/tree-rewind/` (imported from `65fa4fa`) |
 
 Current inventory: **16 extensions**, **6 skills**, and **5 prompt templates**.
+
+## Install on another Mac
+
+Prerequisites are Apple Command Line Tools and Homebrew; install them first if
+`xcode-select -p` or `brew --version` fails (use the official instructions at
+[brew.sh](https://brew.sh/)). The repository is private:
+
+```bash
+brew install gh mise neovim
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
+exec zsh
+gh auth login
+gh repo clone duy-tung/pi-setup ~/repos/pi-setup
+cd ~/repos/pi-setup
+./install.sh
+```
+
+`install.sh` pins Node/Pi and three top-level package versions, applies only the
+managed config, and runs no-cost verification. Replaced config is backed up under
+`~/.local/state/pi-setup/backups/`. Normal errors and catchable signals restore
+managed config, selected mise config/Pi version, and configured package stores;
+a prior different Pi version is reconstructed from npm rather than byte-restored.
+SIGKILL/power loss can leave the fail-closed operation lock and preserved transaction
+for manual recovery. At most an inert, unselected mise Node download may remain.
+Authentication, sessions, trust decisions, spills, and rewind state are never copied
+or replaced.
+
+Provider identity is deliberately not portable. Start Pi and use `/login` for
+Anthropic and Codex on the new machine; make project trust decisions again.
+The installer supports macOS only because the current Bash confinement depends
+on Seatbelt.
 
 ## Runtime layout
 
@@ -24,7 +55,7 @@ Current inventory: **16 extensions**, **6 skills**, and **5 prompt templates**.
 ├── AGENTS.md                 global behavior rules
 ├── settings.json             models, packages, compaction, retry, TUI
 ├── extensions/               always-loaded TypeScript extensions
-│   └── tree-rewind -> ~/Desktop/pi-tree-rewind/src
+│   └── tree-rewind/          bundled extension package
 ├── skills/                   capabilities loaded on demand
 ├── prompts/                  explicit slash-command templates
 ├── sessions/                 local session logs (not tracked)
@@ -56,6 +87,8 @@ after its authority and trust-boundary findings were fixed.
 
 `settings.json` currently selects:
 
+- portable npm wrapper: `mise -C / exec node@24.15.0 -- npm`;
+- exact external package pins, including npm versions;
 - default provider/model: Anthropic, `claude-fable-5`;
 - Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.1`;
 - default thinking: `xhigh`;
@@ -72,8 +105,13 @@ after its authority and trust-boundary findings were fixed.
 | Package | Purpose |
 |---|---|
 | `pi-anthropic-oauth-plus@v0.3.1` (pinned Git) | Anthropic OAuth plus 1-hour prompt cache and bounded keepalive |
-| `pi-web-search` | Web search tools |
-| `@upstash/context7-pi` | Documentation lookup through Context7 |
+| `pi-web-search@1.3.1` | Web search tools |
+| `@upstash/context7-pi@0.1.2` | Documentation lookup through Context7 |
+
+These are exact top-level pins, not a hermetic supply-chain lock: Pi's published npm
+package can resolve newer transitive versions allowed by its own ranges. `doctor.sh`
+checks configured specs, installed top-level versions, OAuth commit/dirty state, and
+isolated load health; it does not hash every installed npm implementation byte.
 
 ### Anthropic prompt-cache policy
 
@@ -159,9 +197,9 @@ session totals. The original answer remains authoritative; any failure shows not
 
 ### Workspace rewind
 
-`extensions/tree-rewind` is a symlink to the separately versioned
-[pi-tree-rewind](https://github.com/duy-tung/pi-tree-rewind) project at
-`~/Desktop/pi-tree-rewind/src`.
+`extensions/tree-rewind/` is a regular bundled Pi package. It was imported
+from the clean standalone commit `65fa4fa`; this repository is now its canonical
+source for the installed setup.
 
 It creates shadow-git worktree checkpoints before prompts, without touching the
 project's `.git`. It can restore code, conversation, or both from a session-tree node.
@@ -176,8 +214,9 @@ User-facing commands:
 
 Checkpoints are automatic. There is no separate manual checkpoint command.
 
-Source changes belong in `~/Desktop/pi-tree-rewind`; the symlink makes them live after
-`/reload`. Do not replace the symlink with an unversioned copy.
+Develop it under `extensions/tree-rewind/`, run its backend tests, then apply the
+managed config and `/reload`. The old standalone repository is historical only and
+is not part of restore.
 
 ## Skills
 
@@ -222,56 +261,62 @@ requests.
 6. Use `/handoff` before stopping an unfinished task.
 7. Use `/rewind` only after previewing the restore plan.
 
-## Sync changes
+## Apply and capture changes
 
-The live directory is authoritative while developing. Mirror it into this repository
-before committing:
+The six managed resources are declared in `scripts/managed-paths.txt`. Apply a
+repository change to the live setup without runtime or package work:
 
 ```bash
 cd ~/repos/pi-setup
-rsync -a --delete ~/.pi/agent/prompts/ prompts/
-rsync -a --delete --links ~/.pi/agent/skills/ skills/
-rsync -a --delete --links ~/.pi/agent/extensions/ extensions/
-cp ~/.pi/agent/AGENTS.md AGENTS.md
-cp ~/.pi/agent/settings.json settings.json
-git add -A
-git diff --cached --stat
+./install.sh --config-only
+# In an already-running Pi TUI:
+/reload
 ```
 
-Never copy `auth.json`, sessions, credentials, caches, or trust state into git.
-
-Commit and push `pi-tree-rewind` separately when its source changes:
+Run the full `./install.sh` instead when runtime or package pins changed. It also
+runs `doctor.sh`. Doctor's Pi startup smoke uses a temporary HOME/config and local
+package paths, so it cannot migrate live credentials. To verify managed/runtime
+state without a model request:
 
 ```bash
-cd ~/Desktop/pi-tree-rewind
-git add -A
-git commit
-git push
+./doctor.sh
 ```
 
-## Restore on a new machine
-
-Prerequisites: Node through mise, Pi, git, and nvim.
+The live directory remains convenient while developing extensions. Capture only
+the managed allowlist back into a clean repository with:
 
 ```bash
-# Main configuration
-git clone https://github.com/duy-tung/pi-setup.git ~/repos/pi-setup
-mkdir -p ~/.pi/agent
+./sync-from-live.sh
+git diff --check
+git status --short
+```
+
+Install and capture share one fail-closed operation lock, so they cannot mutate
+or snapshot the live tree concurrently. The capture script refuses dirty managed
+repo paths and all symlinks, runs the repository audit, and never stages or pushes. The tracked Vietnamese operational
+runbook is `docs/pi-setup-tieng-viet.md`. Never manually mirror the whole
+`~/.pi/agent`: it contains authentication, sessions, trust state, caches, package
+stores, spills, and rewind data.
+
+## Restore and update
+
+After the stated Apple/Homebrew prerequisites, the quick install near the top is
+the new-machine path. Later updates are:
+
+```bash
 cd ~/repos/pi-setup
-rsync -a extensions skills prompts AGENTS.md settings.json ~/.pi/agent/
-export PI_CACHE_RETENTION=long  # also persist this in your shell startup file
-pi update --extensions         # installs the pinned OAuth fork and other packages
-
-# Rewind extension (private repository; authenticate with GitHub first)
-git clone https://github.com/duy-tung/pi-tree-rewind.git ~/Desktop/pi-tree-rewind
-rm -rf ~/.pi/agent/extensions/tree-rewind
-ln -s ~/Desktop/pi-tree-rewind/src ~/.pi/agent/extensions/tree-rewind
+git pull --ff-only
+./install.sh
 ```
 
-The absolute mise/npm path in `settings.json` assumes the same home directory and may
-need adjustment on another account.
-
-Run `pi list`, open a short session, and use `/reload` after changing extensions.
+If SIGKILL/power loss leaves `~/.local/state/pi-setup/operation.lock`, first
+confirm no install/sync process is alive, then remove that exact lock. Preserved
+`transactions/` or `sync-transactions/` contain before-images for manual recovery;
+a normal rerun reapplies the desired managed config but does not silently delete
+those crash artifacts. If an install replaces existing managed config, its prior
+copy is under `~/.local/state/pi-setup/backups/`. Runtime/private state is
+not a repository backup; move sessions separately through Pi's JSONL export/import
+only when needed. `auth.json` must never enter Git.
 
 ## Secrets and excluded state
 
@@ -282,7 +327,7 @@ This repository deliberately excludes:
 - `trust.json`, caches, npm/git package installation state, and model catalogs;
 - temporary spills and runtime logs.
 
-The repositories describe behavior. They are not backups of conversations or secrets.
+The repository describes behavior. It is not a backup of conversations or secrets.
 
 ## Security posture and tests
 
@@ -299,9 +344,11 @@ node --experimental-strip-types --test tests/*.test.mjs
 
 They cover canonical/symlink paths, one-call approvals, Seatbelt profile generation,
 safe spill fallback, RPC framing/dialog/process teardown, parent-scoped durable child
-state, fixed capability profiles, bounded/redacted child reports, and private presentation
-RPC eligibility/ownership/cancellation/fenced-code behavior. Real Seatbelt e2e must run
-outside an already sandboxed parent process.
+state, fixed capability profiles, bounded/redacted child reports, private presentation
+RPC eligibility/ownership/cancellation/fenced-code behavior, repository portability, and
+installer rollback/runtime-state preservation. Bundled rewind backend tests run through
+`npm --prefix extensions/tree-rewind test`. Real Seatbelt e2e must run outside an already
+sandboxed parent process.
 
 ## Known trade-offs
 
@@ -313,7 +360,8 @@ outside an already sandboxed parent process.
 - Anthropic cache keepalive can make up to six hidden cache-read requests per idle live
   conversation; those requests are bounded but absent from Pi's displayed session cost.
 - `tree-rewind` spends disk I/O on automatic checkpoints but does not consume model
-  context. Always inspect its coverage report for paths it cannot protect.
+  context. Always inspect coverage. A very long current session has no hard byte cap;
+  SIGKILL can leave a fail-closed lock requiring confirmed manual removal.
 - `paste-image-attach.ts` touches a private TUI paste path and should be checked after Pi
   upgrades.
 - `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.2 internals;

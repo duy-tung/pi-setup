@@ -1,0 +1,6 @@
+AGENTS.md
+settings.json
+scrub-session-secrets.sh
+extensions
+skills
+prompts

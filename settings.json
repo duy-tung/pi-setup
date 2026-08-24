@@ -12,9 +12,11 @@
   "defaultProjectTrust": "ask",
   "enableInstallTelemetry": false,
   "npmCommand": [
-    "/Users/tung/.local/bin/mise",
+    "mise",
+    "-C",
+    "/",
     "exec",
-    "node",
+    "node@24.15.0",
     "--",
     "npm"
   ],
@@ -47,7 +49,7 @@
   "defaultModel": "claude-fable-5",
   "packages": [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",
-    "npm:pi-web-search",
-    "npm:@upstash/context7-pi"
+    "npm:pi-web-search@1.3.1",
+    "npm:@upstash/context7-pi@0.1.2"
   ]
 }

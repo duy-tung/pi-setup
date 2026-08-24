@@ -1,0 +1,5 @@
+[tools]
+node = "24.15.0"
+
+[env]
+PI_CACHE_RETENTION = "long"

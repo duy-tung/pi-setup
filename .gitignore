@@ -1,0 +1,39 @@
+# OS/editor noise
+.DS_Store
+*.swp
+*.tmp
+*.log
+*.bak
+
+# Dependencies and build output
+node_modules/
+coverage/
+dist/
+
+# Credential-shaped files
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.p12
+*.pfx
+*.key
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Pi runtime/private state (the repository tracks configuration only)
+/auth.json
+/trust.json
+/models-store.json
+/scrub-backups.txt
+/sessions/
+/subagents/
+/rewind/
+/spill/
+/cache/
+/npm/
+/git/
+/backups/

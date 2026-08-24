@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -229,7 +229,8 @@ test("stderr logging refuses symlinks without modifying their target", async () 
   const root = mkdtempSync(join(tmpdir(), "pi-subagent-rpc-symlink-"));
   const target = join(root, "target.txt");
   const link = join(root, "stderr.log");
-  writeFileSync(target, "DO_NOT_TOUCH", { mode: 0o644 });
+  writeFileSync(target, "DO_NOT_TOUCH");
+  chmodSync(target, 0o644);
   symlinkSync(target, link);
   try {
     await assert.rejects(ManagedRpcChild.start({

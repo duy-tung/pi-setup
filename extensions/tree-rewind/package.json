@@ -1,0 +1,29 @@
+{
+  "name": "pi-tree-rewind",
+  "version": "0.3.1",
+  "description": "Worktree checkpoints for Pi backed by shadow git repos: rewind code and/or conversation from any node in the session tree. Not the project's own git.",
+  "license": "MIT",
+  "author": "duytung160596",
+  "type": "module",
+  "private": true,
+  "files": [
+    "src/",
+    "README.md",
+    "SPEC.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/backend-test.mts",
+    "test:hazards": "bash spike/hazards.sh && bash spike/hazards2.sh",
+    "bench": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/perf-test.mts",
+    "spike": "node spike/shadow-git-spike.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  }
+}
