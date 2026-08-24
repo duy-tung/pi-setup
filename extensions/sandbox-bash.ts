@@ -13,7 +13,7 @@
  */
 
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,9 +22,12 @@ import {
   classifyFailure,
   confine,
   DENIAL_MARKER,
+  PLAN_DENIAL_MARKER,
   RUNNER_MARKER,
+  SEATBELT_AVAILABLE,
   writableRoots,
 } from "./lib/seatbelt";
+import { getPermissionMode } from "./lib/permission-mode.ts";
 import {
   isUnsafeWorkspaceRoot,
   protectedWriteRules,
@@ -51,7 +54,7 @@ function scrub(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-const sandboxActive = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+const sandboxActive = SEATBELT_AVAILABLE;
 
 function bashSettings(): { shellPath?: string; commandPrefix?: string } {
   try {
@@ -71,6 +74,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     ...template,
+    executionMode: "sequential",
     description: sandboxActive
       ? `${template.description} Commands run with macOS Bash confinement: writes outside the current workspace and temp areas, writes to protected config, and reads of known credential paths are denied. Other reads and network are unrestricted. Sandbox denials cannot be escalated by the agent.`
       : `${template.description} The OS Bash sandbox is unavailable; only sensitive environment-variable scrubbing is active.`,
@@ -88,9 +92,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       const canonicalCwd = canonical(cwd);
-      const roots = writableRoots(canonicalCwd).filter(
-        (root) => !isUnsafeWorkspaceRoot(canonicalCwd) || root !== canonicalCwd,
-      );
+      const mode = getPermissionMode();
+      const roots = mode === "plan"
+        ? []
+        : writableRoots(canonicalCwd).filter(
+            (root) => !isUnsafeWorkspaceRoot(canonicalCwd) || root !== canonicalCwd,
+          );
       const profile = buildProfile(
         roots,
         sensitiveReadRules(canonicalCwd),
@@ -111,7 +118,7 @@ export default function (pi: ExtensionAPI) {
           if (kind === "runner") throw new Error(`${error.message}\n\n${RUNNER_MARKER}`);
           if (kind === "denial") {
             throw new Error(
-              `${error.message}\n\n${DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
+              `${error.message}\n\n${mode === "plan" ? PLAN_DENIAL_MARKER : DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
             );
           }
         }

@@ -63,7 +63,7 @@ function handle(command) {
         model: { provider: "fake", id: "fake-model" },
         thinkingLevel: "off",
         isStreaming: false,
-        sessionFile: "/tmp/fake-subagent-session.jsonl",
+        ...(process.env.FAKE_RPC_NO_SESSION === "1" ? {} : { sessionFile: "/tmp/fake-subagent-session.jsonl" }),
         sessionId: "fake-session",
         sessionName: "fake-child",
         pendingMessageCount: 0,

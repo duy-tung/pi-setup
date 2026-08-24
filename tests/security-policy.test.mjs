@@ -13,6 +13,11 @@ import {
   sensitivePath,
   sensitiveReadRules,
 } from "../extensions/lib/path-policy.ts";
+import {
+  getPermissionMode,
+  rememberPermissionSubagent,
+  resetPermissionRuntime,
+} from "../extensions/lib/permission-mode.ts";
 import { buildProfile, confine, writableRoots } from "../extensions/lib/seatbelt.ts";
 
 function fixture() {
@@ -29,7 +34,8 @@ function fixture() {
   };
 }
 
-function captureHandler() {
+function captureHandler(mode = "auto") {
+  resetPermissionRuntime(mode);
   let handler;
   permissionGate({
     on(name, fn) {
@@ -152,6 +158,112 @@ test("permission gate canonicalizes normal reads and asks exactly once for outsi
   }
 });
 
+test("permission modes enforce the edit and Bash decision matrix", async () => {
+  const f = fixture();
+  try {
+    const workspaceFile = join(f.work, "src.ts");
+
+    let handler = captureHandler("auto");
+    let ctx = context(f.work, true);
+    assert.equal(await handler({ toolName: "write", input: { path: workspaceFile, content: "x" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 0);
+    assert.equal(await handler({ toolName: "bash", input: { command: "printf test" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 0);
+
+    handler = captureHandler("manual");
+    ctx = context(f.work, true);
+    assert.equal(await handler({ toolName: "write", input: { path: workspaceFile, content: "x" } }, ctx.value), undefined);
+    assert.equal(await handler({ toolName: "bash", input: { command: "pwd" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 2);
+
+    handler = captureHandler("accept-edits");
+    ctx = context(f.work, true);
+    assert.equal(await handler({ toolName: "edit", input: { path: workspaceFile, oldText: "a", newText: "b" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 0);
+    assert.equal(await handler({ toolName: "bash", input: { command: "git status" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 1);
+
+    handler = captureHandler("plan");
+    ctx = context(f.work, true);
+    assert.equal((await handler({ toolName: "write", input: { path: workspaceFile, content: "x" } }, ctx.value)).block, true);
+    assert.equal((await handler({ toolName: "bash", input: { command: "pwd" } }, ctx.value)).block, true);
+    assert.equal((await handler({ toolName: "mystery", input: {} }, ctx.value)).block, true);
+    assert.equal(ctx.calls.length, 0);
+  } finally {
+    f.cleanup();
+    resetPermissionRuntime();
+  }
+});
+
+test("Bypass skips prompts but preserves credential and write-boundary hard stops", async () => {
+  const f = fixture();
+  const external = mkdtempSync(join(homedir(), ".pi-policy-bypass-out-"));
+  try {
+    const handler = captureHandler("bypass");
+    const ctx = context(f.work, true);
+    assert.equal(getPermissionMode(), "bypass");
+    assert.equal(await handler({ toolName: "bash", input: { command: "rm -rf build" } }, ctx.value), undefined);
+    assert.equal(await handler({ toolName: "write", input: { path: join(f.work, "ok.txt"), content: "x" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 0);
+
+    const outside = await handler(
+      { toolName: "write", input: { path: join(external, "blocked.txt"), content: "x" } },
+      ctx.value,
+    );
+    assert.equal(outside.block, true);
+    assert.match(outside.reason, /Bypass skips prompts/);
+
+    const credential = await handler({ toolName: "read", input: { path: join(f.work, ".env") } }, ctx.value);
+    assert.equal(credential.block, true);
+    const token = await handler({ toolName: "bash", input: { command: "gh auth token" } }, ctx.value);
+    assert.equal(token.block, true);
+    assert.equal(ctx.calls.length, 0);
+  } finally {
+    f.cleanup();
+    rmSync(external, { recursive: true, force: true });
+    resetPermissionRuntime();
+  }
+});
+
+test("work subagent activation is broad-approved in Manual and blocked in Plan", async () => {
+  const f = fixture();
+  try {
+    let handler = captureHandler("manual");
+    let ctx = context(f.work, true);
+    const start = {
+      toolName: "subagent",
+      input: { profile: "work", description: "implement parser", prompt: "details" },
+    };
+    assert.equal(await handler(start, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 1);
+    assert.equal(ctx.calls[0].message.includes("details"), false);
+
+    rememberPermissionSubagent("work-child", "work");
+    assert.equal(
+      await handler({ toolName: "send_message", input: { subagent_id: "work-child", message: "continue" } }, ctx.value),
+      undefined,
+    );
+    assert.equal(ctx.calls.length, 2);
+
+    handler = captureHandler("plan");
+    rememberPermissionSubagent("work-child", "work");
+    ctx = context(f.work, true);
+    assert.equal((await handler(start, ctx.value)).block, true);
+    assert.equal(
+      (await handler({ toolName: "send_message", input: { subagent_id: "work-child", message: "continue" } }, ctx.value)).block,
+      true,
+    );
+    assert.equal(
+      await handler({ toolName: "subagent", input: { profile: "explore", description: "inspect", prompt: "read" } }, ctx.value),
+      undefined,
+    );
+    assert.equal(ctx.calls.length, 0);
+  } finally {
+    f.cleanup();
+    resetPermissionRuntime();
+  }
+});
+
 test("Seatbelt profile shares canonical roots and adds sensitive/protected denies", () => {
   const f = fixture();
   try {
@@ -173,6 +285,15 @@ test("sandbox source exposes no unsandboxed escalation path", () => {
   const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
   assert.equal(source.includes("sandbox_permissions"), false);
   assert.equal(source.includes("danger-full-access"), false);
+  assert.match(source, /executionMode: "sequential"/);
+  assert.match(source, /mode === "plan"\s*\? \[\]/);
+
+  const modeSource = readFileSync(new URL("../extensions/permission-mode.ts", import.meta.url), "utf8");
+  const stateSource = readFileSync(new URL("../extensions/lib/permission-mode.ts", import.meta.url), "utf8");
+  assert.match(modeSource, /SEATBELT_AVAILABLE/);
+  assert.match(source, /sandboxActive = SEATBELT_AVAILABLE/);
+  assert.equal(modeSource.includes("PI_PERMISSION_MODE"), false);
+  assert.equal(stateSource.includes("PI_PERMISSION_MODE"), false);
 });
 
 test("RPC subagent has no tmux, cwd override, or legacy control surface", () => {
@@ -192,6 +313,9 @@ test("RPC subagent has no tmux, cwd override, or legacy control surface", () => 
   assert.match(source, /setImmediate/);
   assert.match(source, /if \(!live\.settled\) return "queued"/);
   assert.match(source, /markInterruption/);
+  assert.match(source, /getPermissionMode\(\) === "plan"/);
+  assert.match(source, /markWorkSubagentRunning/);
+  assert.equal(source.includes("PI_PERMISSION_MODE"), false);
   assert.match(source, /void settlement\.catch\(\(\) => \{\}\)/);
   assert.match(source, /finalizePromise\.catch\(\(\) => \{\}\)/);
 

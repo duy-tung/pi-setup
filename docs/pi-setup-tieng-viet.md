@@ -132,6 +132,7 @@ Lệnh setup cần nhớ:
 | Lệnh | Vai trò |
 |---|---|
 | `/reload` | Nạp lại source sau khi áp dụng config |
+| `/mode` | Chọn Auto, Manual, Accept edits, Plan hoặc Bypass tạm thời |
 | `/agents` | Xem/steer/resume/interrupt RPC children |
 | `/goal`, `/todos` | Long-running goal và task checklist |
 | `/tree`, `/rewind` | Conversation tree và worktree restore |
@@ -139,6 +140,27 @@ Lệnh setup cần nhớ:
 | `/present on\|off` | Opt-in GPT presentation; mặc định off mỗi session/reload |
 | `/fast on\|off` | Anthropic fast mode khi model hỗ trợ |
 | `/review`, `/grill`, `/handoff`, `/teach`, `/wait-what` | Prompt templates |
+
+### Permission mode
+
+`/mode` hoặc `Ctrl+Alt+M` mở selector năm dòng:
+
+- **Auto** (default): giữ workflow hiện tại — workspace edit và Bash thông thường chạy
+  dưới policy/sandbox; destructive, protected hoặc outside operation mới hỏi.
+- **Manual**: dedicated read/search tools chạy tự do; mỗi `edit`/`write`, mỗi Bash call và
+  mỗi work-child activation đều hỏi một lần.
+- **Accept edits**: ordinary `edit`/`write` trong workspace tự chạy; Bash, protected/outside
+  write, unknown side-effect tool và work-child activation vẫn hỏi.
+- **Plan**: gỡ `bash`, `edit`, `write` khỏi active tools; chặn work child và unknown
+  side-effect tool. Khi thoát, chỉ ba tool mà Plan đã tắt được restore; tool thêm động không
+  bị mất.
+- **Bypass permissions**: phải confirm trong attended TUI và chỉ sống trong runtime hiện tại.
+  Nó bỏ soft prompt nhưng không bỏ Seatbelt, protected/outside boundary hoặc credential deny.
+
+Auto/Manual/Accept edits/Plan đi theo active session branch. Bypass reset về Auto sau
+`/reload`, resume, fork hoặc session mới. Không đổi mode khi parent đang chạy; mode change và
+conversation-tree navigation đều bị chặn khi work child đang starting/running. Wait hoặc
+interrupt child trước.
 
 ## 5. Subagent và presentation
 
@@ -148,8 +170,11 @@ Public API giữ cố định:
 - profiles: `explore`, `web`, `work`.
 
 Subagents dùng native Pi RPC. Child process chỉ sống trong một active turn; durable child
-session nằm dưới `~/.pi/agent/subagents/` và không được backup vào repo. Đây là tool/profile
-restriction để giảm tai nạn, không phải process isolation; Bash network vẫn unrestricted.
+session nằm dưới `~/.pi/agent/subagents/` và không được backup vào repo. Manual/Accept edits
+coi mỗi new/resumed `work` activation là một broad approval scope vì unattended child không
+forward được từng popup; Plan chặn work activation. Parent permission mode không truyền vào
+child. Đây là tool/profile restriction để giảm tai nạn, không phải process isolation; Bash
+network vẫn unrestricted.
 
 `present.ts` không phải public subagent. Exact `/present on` mới cho phép gửi future eligible
 answers sang private one-shot RPC `openai-codex/gpt-5.6-sol:off`. Original answer luôn là
@@ -176,9 +201,12 @@ Log ở `~/.pi/agent/cache/cache-keepalive.log`; tắt debug sau khi điều tra
 
 ## 7. Safety và giới hạn thật
 
-- `permission-gate` hard-deny known credential paths và hỏi một lần cho destructive,
-  protected hoặc outside writes.
-- `sandbox-bash` dùng macOS Seatbelt cho Bash file effects; reads khác và network vẫn mở.
+- `permission-mode` chỉ thay soft approval policy; known credential deny và canonical path
+  boundary không thể bị Bypass tắt.
+- `permission-gate` là sole pre-execution owner cho model tools; Manual/Accept edits hỏi đúng
+  một lần theo matrix, Plan block phòng thủ và Bypass vẫn block protected/outside built-in writes.
+- `sandbox-bash` chạy Bash tuần tự qua macOS Seatbelt; Plan không có writable root, reads khác
+  và network vẫn mở, không có unsandboxed retry.
 - `secret-guard` và spill redaction là best effort, không phải data-loss-proof DLP.
 - Global/package extensions chạy với quyền của user.
 - Child reports, web, logs và files đều là untrusted task data.

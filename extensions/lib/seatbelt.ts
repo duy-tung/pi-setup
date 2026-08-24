@@ -8,13 +8,16 @@
  * Kept free of package imports so it can be unit-tested with plain node.
  */
 
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 /** Model-facing markers — one vocabulary for every sandbox outcome. */
 export const DENIAL_MARKER = "[sandbox: file access denied under workspace-write mode]";
+export const PLAN_DENIAL_MARKER = "[sandbox: file access denied under Plan read-only mode]";
 export const RUNNER_MARKER =
 	"[sandbox: sandbox runner failed — this is a sandbox problem, not a command failure; do not rewrite the command]";
+
+export const SEATBELT_AVAILABLE = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 
 /** SBPL string literal with backslash/quote escaping. */
 export function sbplString(path: string): string {

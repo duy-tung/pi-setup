@@ -31,6 +31,12 @@ import {
 import { Type } from "typebox";
 
 import { isUnder, isUnsafeWorkspaceRoot, resolvePolicyPath } from "./lib/path-policy.ts";
+import {
+  clearPermissionSubagents,
+  getPermissionMode,
+  markWorkSubagentRunning,
+  rememberPermissionSubagent,
+} from "./lib/permission-mode.ts";
 import { resolvePiInvocation } from "./lib/pi-invocation.ts";
 import {
   ManagedRpcChild,
@@ -271,6 +277,7 @@ export default function (pi: ExtensionAPI) {
   function commit(record: SubagentRecord): void {
     pi.appendEntry(SUBAGENT_STATE_TYPE, record);
     records.set(record.id, record);
+    rememberPermissionSubagent(record.id, record.profile);
   }
 
   function syncWidget(ctx = uiCtx): void {
@@ -417,12 +424,13 @@ export default function (pi: ExtensionAPI) {
     const safeReport = report || (outcome ?? "no report");
     if (activeChild.background && activeChild.interruptReason !== "shutdown") noteCompletion(terminal, safeReport);
 
-    activeChild.unsubscribe();
     try {
+      activeChild.unsubscribe();
       await activeChild.rpc.dispose();
     } finally {
       if (active.get(terminal.id) === activeChild) active.delete(terminal.id);
       if (resident.get(terminal.id) === activeChild) resident.delete(terminal.id);
+      if (terminal.profile === "work") markWorkSubagentRunning(terminal.id, false);
       syncWidget();
     }
     return { record: terminal, report: safeReport, isError: status !== "ready" };
@@ -464,6 +472,9 @@ export default function (pi: ExtensionAPI) {
     isNew = false,
   ): Promise<ActivationResult | SubagentRecord> {
     if (shuttingDown) throw new Error("Parent session is shutting down; no new subagent can start.");
+    if (base.profile === "work" && getPermissionMode() === "plan") {
+      throw new Error("Work subagents cannot start or resume while Plan mode is active.");
+    }
     if (base.parentSessionId !== currentSessionId(ctx)) throw new Error("Subagent does not belong to this parent session.");
     const expectedArtifactDir = expectedSubagentArtifactDir(base.parentSessionId, base.id);
     if (!subagentRecordPathsAreValid(base)) {
@@ -520,6 +531,7 @@ export default function (pi: ExtensionAPI) {
       startupController.abort("subagent startup cancelled");
     };
     starting.set(base.id, base.profile);
+    if (base.profile === "work") markWorkSubagentRunning(base.id, true);
     startupLifecycles.set(base.id, lifecycle);
     if (signal?.aborted) abortStartup();
     else signal?.addEventListener("abort", abortStartup, { once: true });
@@ -607,6 +619,7 @@ export default function (pi: ExtensionAPI) {
       starting.delete(record.id);
       active.delete(record.id);
       resident.delete(record.id);
+      if (record.profile === "work") markWorkSubagentRunning(record.id, false);
       await rpc?.dispose();
       if (isNew && !records.has(record.id)) {
         try {
@@ -856,9 +869,13 @@ export default function (pi: ExtensionAPI) {
     shuttingDown = false;
     overlayOpen = false;
     records.clear();
+    clearPermissionSubagents();
     diagnostics.length = 0;
     const folded = foldSubagentRecords(ctx.sessionManager.getBranch(), ownerSessionId);
-    for (const [id, record] of folded.records) records.set(id, record);
+    for (const [id, record] of folded.records) {
+      records.set(id, record);
+      rememberPermissionSubagent(id, record.profile);
+    }
     diagnostics.push(...folded.diagnostics);
 
     for (const record of [...records.values()]) {

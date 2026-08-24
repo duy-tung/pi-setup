@@ -15,7 +15,7 @@ This private repository is the source of truth for six managed resources under
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
 | Rewind source | Bundled package under `extensions/tree-rewind/` (imported from `65fa4fa`) |
 
-Current inventory: **16 extensions**, **6 skills**, and **5 prompt templates**.
+Current inventory: **17 extensions**, **6 skills**, and **5 prompt templates**.
 
 ## Install on another Mac
 
@@ -142,13 +142,28 @@ turn.
 
 | Extension | Behavior |
 |---|---|
-| `permission-gate.ts` | Single pre-execution owner: canonical sensitive-path deny and exact one-call confirmation for destructive/protected/outside writes |
+| `permission-mode.ts` | User-owned Auto, Manual, Accept edits, Plan, and transient Bypass modes; branch-local state and footer status through `/mode` or `Ctrl+Alt+M` |
+| `permission-gate.ts` | Single pre-execution owner: invariant credential/path denies, mode-aware one-call approvals, and defensive Plan/Bypass boundaries |
 | `secret-guard.ts` | Best-effort known-pattern redaction of final text tool results before the normal transcript/provider path |
-| `sandbox-bash.ts` | Per-call macOS Seatbelt confinement for Bash file writes and known credential reads, plus environment scrubbing; network remains unrestricted and there is no agent escalation |
+| `sandbox-bash.ts` | Sequential per-call macOS Seatbelt confinement for Bash file writes and known credential reads, plus environment scrubbing; Plan has no writable roots, network remains unrestricted, and there is no agent escalation |
 | `spill.ts` | Stores output larger than 16 KiB as a private redacted artifact; unsafe raw core output is withheld, never exposed as a locator |
 | `compaction-prune.ts` | Trims oversized blocks before the compaction summarizer sees them |
 | `repeat-reminder.ts` | Detects identical repeated tool calls and injects escalating loop warnings |
 | `runtime-context.ts` | Adds changing facts such as cwd, branch, dirty state, and date without invalidating the system-prompt cache |
+
+`/mode` opens a five-row selector; `Ctrl+Alt+M` opens the same UI. Auto is the default
+and preserves the prior low-friction policy. Manual asks once for every edit/write, every
+Bash call, and every mutation-capable work-child activation. Accept edits allows ordinary
+workspace edit/write calls but still asks for Bash, protected/outside writes, unknown
+side-effect tools, and work-child activation. Plan removes `bash`, `edit`, and `write`,
+blocks work children and unknown side-effect tools, and restores only the tools it disabled
+when leaving. Auto, Manual, Accept edits, and Plan follow the active session branch.
+
+Bypass requires an attended confirmation and active macOS Seatbelt. It skips soft prompts
+for the current runtime only; Bash stays workspace-confined, built-in protected/outside
+writes and credential access stay blocked, and RPC children retain their fixed independent
+policy. Reload, resume, fork, or a new session returns Bypass to Auto. Mode changes and
+conversation-tree navigation are refused while a work child is starting/running.
 
 ### Interaction and orchestration
 
@@ -172,8 +187,10 @@ Every child uses `--no-approve`, so project-controlled extensions and context ca
 an allowed built-in tool name. The `web` profile additionally uses `--no-context-files` and
 has no filesystem tools. The `work` profile still requires the parent to be in a trusted,
 non-broad workspace, but the standalone child prompt must carry the relevant project rules;
-its Bash retains host network access. These are model-tool restrictions and accident
-resistance, not process isolation. RPC dialogs fail closed, reports are
+its Bash retains host network access. Manual and Accept edits treat each new/resumed work
+activation as one broad approval scope because an unattended child cannot forward per-edit
+prompts. Plan blocks those activations, and no parent mode is passed into the child. These are
+model-tool restrictions and accident resistance, not process isolation. RPC dialogs fail closed, reports are
 redacted/marked/capped before entering parent context, and active children stop on every
 parent session shutdown.
 
@@ -251,9 +268,9 @@ requests.
 
 ## Typical workflow
 
-1. Start Pi in the project directory.
+1. Start Pi in the project directory; keep default Auto or choose another policy with `/mode`.
 2. Describe the task normally. Use `/grill` first when the design is unclear.
-3. Watch assumptions, destructive-action confirmations, and the todo widget while Pi
+3. Watch assumptions, mode/operation confirmations, and the todo widget while Pi
    works.
 4. Use `/review` before merging non-trivial changes.
 5. Use `/wait-what` when an explanation does not land. Enable `/present on` only when
@@ -342,8 +359,9 @@ Focused policy tests use Node's built-in runner:
 node --experimental-strip-types --test tests/*.test.mjs
 ```
 
-They cover canonical/symlink paths, one-call approvals, Seatbelt profile generation,
-safe spill fallback, RPC framing/dialog/process teardown, parent-scoped durable child
+They cover the five-mode decision/persistence/tool-restoration matrix, canonical/symlink
+paths, one-call approvals, Seatbelt profile generation, safe spill fallback, RPC
+framing/dialog/process teardown, parent-scoped durable child
 state, fixed capability profiles, bounded/redacted child reports, private presentation
 RPC eligibility/ownership/cancellation/fenced-code behavior, repository portability, and
 installer rollback/runtime-state preservation. Bundled rewind backend tests run through
