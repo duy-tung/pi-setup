@@ -431,9 +431,12 @@ export async function applyUndo(
 ): Promise<ApplyResult | null> {
   const undo = prepared ?? (await planUndo(state));
   if (!undo || !state.undo || !state.outside) return null;
+  const originalUndo = state.undo;
 
   let result: ApplyResult;
   let reverseUndo: RewindState["undo"] = null;
+  let promotionWorkspace: Workspace | null = null;
+  let didApply = false;
   if (state.disabled) {
     mkdirSync(state.outside.storeDir, { recursive: true, mode: 0o700 });
     result = await withLock(join(state.outside.storeDir, "snapshot.lock"), async () => {
@@ -441,10 +444,10 @@ export async function applyUndo(
       const freshPlan = withOutside(state, EMPTY_PLAN, state.undo?.outside);
       const lockedResult: ApplyResult = { restored: 0, deleted: 0, skipped: [], errors: [] };
       reverseUndo = { snapshot: {}, outside: outsideBefore, timestamp: Date.now(), label: "before undo" };
-      state.undo = reverseUndo;
       applyOutside(state, freshPlan, { includeTypeChanges: opts.includeTypeChanges, includeOutside: true }, lockedResult);
       return lockedResult;
     });
+    didApply = result.restored + result.deleted > 0;
   } else {
     const ws = await waitReady(state);
     if (!ws) return null;
@@ -456,8 +459,7 @@ export async function applyUndo(
       {
         sessionId: state.sessionId ?? undefined,
         pendingEntry: "undo-prev",
-        previousUndo: state.undo.snapshot,
-        publishEntry: "undo",
+        keepPending: true,
       },
       (worktreePlan) => ({
         ...withOutside(state, worktreePlan, state.undo?.outside),
@@ -475,7 +477,6 @@ export async function applyUndo(
           timestamp: Date.now(),
           label: "before undo",
         };
-        state.undo = reverseUndo;
       },
       (lockedResult, plan) => {
         applyOutside(
@@ -487,6 +488,8 @@ export async function applyUndo(
       },
     );
     result = outcome.result;
+    didApply = outcome.applied;
+    promotionWorkspace = ws;
     reverseUndo = {
       snapshot: outcome.undoSnapshot,
       outside: outcome.plan.outsideFrom,
@@ -498,9 +501,21 @@ export async function applyUndo(
   // A skipped type change means the undo is intentionally incomplete and must
   // remain retryable after the user inspects/confirms it.
   const incomplete = result.skipped.some((item) => item.action === "type-change");
-  if (result.errors.length === 0 && !incomplete) {
+  if (didApply && result.errors.length === 0 && !incomplete && reverseUndo) {
+    if (promotionWorkspace && state.sessionId) {
+      await promotionWorkspace.replaceSnapshotRef(
+        reverseUndo.snapshot,
+        originalUndo.snapshot,
+        state.sessionId,
+        "undo",
+      );
+      await promotionWorkspace.deleteSnapshotRef(state.sessionId, "undo-prev").catch(() => {});
+    }
     state.undo = reverseUndo;
     if (!state.disabled) state.head = undo.target;
+  } else {
+    // Failed/skipped undo must remain retryable at the original destination.
+    state.undo = originalUndo;
   }
   return result;
 }

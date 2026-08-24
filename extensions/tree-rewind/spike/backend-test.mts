@@ -1136,12 +1136,13 @@ async function testOutsideUndoFailureKeepsRetry() {
   await applyPlan(state, plan, { includeOutside: true });
   ok(readFileSync(ext, "utf8") === "v1\n", "initial restore created an undo point");
   ok(state.undo !== null, "undo point exists before retry sabotage");
+  const retryTarget = state.undo;
 
   rmSync(parent, { recursive: true, force: true });
   symlinkSync(elsewhere, parent);
   const result = await applyUndo(state);
   ok(result !== null && result.errors.length > 0, "outside undo failure is reported");
-  ok(state.undo !== null, "failed outside undo keeps the retry point");
+  ok(state.undo === retryTarget, "failed outside undo preserves the exact retry target");
   rmSync(parent, { force: true });
 }
 
@@ -1336,10 +1337,11 @@ async function testApplyAndUndoTypeRevalidation() {
   mkdirSync(path);
   writeFileSync(join(path, "keep.txt"), "post-rewind user data\n");
   const undo = (await planUndo(state))!;
+  const retryTarget = state.undo;
   const undoResult = await applyUndo(state, undo);
   ok(undoResult !== null && undoResult.skipped.some((item) => item.action === "type-change"), "undo skips unconfirmed late type change");
   ok(readFileSync(join(path, "keep.txt"), "utf8") === "post-rewind user data\n", "undo leaves new directory contents untouched");
-  ok(state.undo !== null, "incomplete undo remains available for explicit confirmation");
+  ok(state.undo === retryTarget, "incomplete undo preserves the exact retry target");
 }
 
 // ── 41. missing nested repos do not invalidate the root checkpoint ──────────
