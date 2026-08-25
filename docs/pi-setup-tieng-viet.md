@@ -45,7 +45,7 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 |---|---|
 | Node | `24.15.0` qua mise |
 | Pi | `@earendil-works/pi-coding-agent@0.84.3` |
-| Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1` |
+| Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2` |
 | Web search | `npm:pi-web-search@1.3.1` |
 | Context7 | `npm:@upstash/context7-pi@0.1.2` |
 | tree-rewind | bundled package `extensions/tree-rewind/`, provenance `65fa4fa` |
@@ -53,12 +53,13 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 `settings.json` gọi npm qua:
 
 ```text
-mise -C / exec node@24.15.0 -- npm
+mise --no-config exec node@24.15.0 -- npm
 ```
 
-`-C /` tránh phụ thuộc vào mise config/trust của project hiện tại. Repo có `mise.toml` để
-mô tả pin, nhưng installer không cần trust file đó để bootstrap. Transaction backup tôn trọng
-`MISE_GLOBAL_CONFIG_FILE` khi user override global config path.
+`--no-config` tránh phụ thuộc vào mise config/trust của project nhưng vẫn giữ package cwd mà
+Pi truyền cho `npm install`; dùng `-C /` ở đây sẽ làm npm chạy nhầm tại `/`. Repo có `mise.toml`
+để mô tả pin, nhưng installer không cần trust file đó để bootstrap. Transaction backup tôn
+trọng `MISE_GLOBAL_CONFIG_FILE` khi user override global config path.
 
 `defaultTools` pin exact `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Ba dedicated
 read-only tools làm Manual/Plan search được mà không cần Bash; PowerShell không active trên
@@ -68,6 +69,8 @@ OAuth fork vẫn là dependency GitHub ngoài repo và được fetch theo tag c
 đây nghĩa là chỉ cần clone một private setup repo; không vendor toàn bộ third-party packages.
 Đây là exact top-level pins, không phải hermetic dependency lock: transitive npm versions vẫn
 có thể đổi trong range package upstream cho phép. Doctor không hash toàn bộ installed bytes.
+OAuth v0.3.2 honors request-body/tool-choice hooks, merge required betas nhưng loại
+fine-grained tool streaming, và ghi đúng returned fallback model cùng pricing của nó.
 
 ## 3. Phạm vi repo và dữ liệu private
 
@@ -143,7 +146,7 @@ Lệnh setup cần nhớ:
 | `/tree`, `/rewind` | Conversation tree và worktree restore |
 | `/limits` | Anthropic plan limits |
 | `/present on\|off` | Opt-in GPT presentation; mặc định off mỗi session/reload |
-| `/fast on\|off` | Anthropic fast mode khi model hỗ trợ |
+| `/fast on\|off` | Anthropic fast mode; OAuth v0.3.2 giữ required betas và loại fine-grained streaming |
 | `/review`, `/grill`, `/handoff`, `/teach`, `/wait-what` | Prompt templates |
 
 ### Permission mode

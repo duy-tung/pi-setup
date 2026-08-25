@@ -125,9 +125,9 @@ try {
 }
 
 const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
-const expectedNpm = ["mise", "-C", "/", "exec", "node@24.15.0", "--", "npm"];
+const expectedNpm = ["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"];
 const expectedPackages = [
-  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",
+  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
   "npm:pi-web-search@1.3.1",
   "npm:@upstash/context7-pi@0.1.2",
 ];

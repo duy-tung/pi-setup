@@ -80,7 +80,7 @@ cache_value="$(env -u PI_CACHE_RETENTION "$MISE" --quiet -C / exec "node@$NODE_V
 
 list_output="$("$MISE" --quiet -C / exec "node@$NODE_VERSION" -- pi list)"
 for spec in \
-  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1" \
+  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2" \
   "npm:pi-web-search@1.3.1" \
   "npm:@upstash/context7-pi@0.1.2"
 do
@@ -88,7 +88,7 @@ do
 done
 
 oauth_store="$AGENT_DIR/git/github.com/duy-tung/pi-anthropic-oauth-plus"
-[ "$(git -C "$oauth_store" rev-parse HEAD 2>/dev/null || true)" = "3dddb09bc5065d1362de9c747b35c6b3f016974a" ] || fail "installed OAuth checkout is not the v0.3.1 commit"
+[ "$(git -C "$oauth_store" rev-parse HEAD 2>/dev/null || true)" = "1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49" ] || fail "installed OAuth checkout is not the v0.3.2 commit"
 [ -z "$(git -C "$oauth_store" status --porcelain --untracked-files=all 2>/dev/null || printf dirty)" ] || fail "installed OAuth checkout has tracked modifications"
 web_meta="$AGENT_DIR/npm/node_modules/pi-web-search/package.json"
 context_meta="$AGENT_DIR/npm/node_modules/@upstash/context7-pi/package.json"

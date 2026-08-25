@@ -6,7 +6,7 @@ umask 077
 NODE_VERSION="24.15.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
 PI_VERSION="0.84.3"
-OAUTH_COMMIT="3dddb09bc5065d1362de9c747b35c6b3f016974a"
+OAUTH_COMMIT="1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49"
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
@@ -145,12 +145,12 @@ const fs = require("node:fs");
 const p = process.argv[1];
 const s = JSON.parse(fs.readFileSync(p, "utf8"));
 const expected = [
-  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",
+  "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
   "npm:pi-web-search@1.3.1",
   "npm:@upstash/context7-pi@0.1.2",
 ];
 const defaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-if (JSON.stringify(s.npmCommand) !== JSON.stringify(["mise", "-C", "/", "exec", "node@24.15.0", "--", "npm"])) throw new Error("portable npmCommand mismatch");
+if (JSON.stringify(s.npmCommand) !== JSON.stringify(["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"])) throw new Error("portable npmCommand mismatch");
 if (JSON.stringify(s.packages) !== JSON.stringify(expected)) throw new Error("pinned package list mismatch");
 if (JSON.stringify(s.defaultTools) !== JSON.stringify(defaultTools)) throw new Error("default tool list mismatch");
 ' "$STAGE/settings.json"
@@ -368,7 +368,13 @@ if [ "$MODE" = "full" ]; then
   else
     printf '%s\n' "==> Reconciling pinned Pi packages transactionally"
     prepare_package_transaction
-    "$MISE" -C / exec "node@$NODE_VERSION" -- pi update --extensions --no-approve
+    for spec in \
+      "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2" \
+      "npm:pi-web-search@1.3.1" \
+      "npm:@upstash/context7-pi@0.1.2"
+    do
+      "$MISE" -C / exec "node@$NODE_VERSION" -- pi install "$spec" --no-approve
+    done
   fi
   "$ROOT/doctor.sh"
 else

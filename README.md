@@ -87,11 +87,11 @@ after its authority and trust-boundary findings were fixed.
 
 `settings.json` currently selects:
 
-- portable npm wrapper: `mise -C / exec node@24.15.0 -- npm`;
+- portable npm wrapper: `mise --no-config exec node@24.15.0 -- npm` (ignores project config without changing package cwd);
 - exact external package pins, including npm versions;
 - exact initial built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` (no PowerShell);
 - default provider/model: Anthropic, `claude-fable-5`;
-- Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.1`;
+- Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.2`;
 - default thinking: `xhigh`; `/model` and `/thinking` changes stay session-local unless Ctrl+S explicitly saves a global default;
 - enabled model families: Claude Fable/Opus/Sonnet/Haiku and
   `openai-codex/gpt-5.6-*`;
@@ -106,14 +106,16 @@ after its authority and trust-boundary findings were fixed.
 
 | Package | Purpose |
 |---|---|
-| `pi-anthropic-oauth-plus@v0.3.1` (pinned Git) | Anthropic OAuth plus 1-hour prompt cache and bounded keepalive |
+| `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3 request hooks, and server-side fallback pricing |
 | `pi-web-search@1.3.1` | Web search tools |
 | `@upstash/context7-pi@0.1.2` | Documentation lookup through Context7 |
 
 These are exact top-level pins, not a hermetic supply-chain lock: Pi's published npm
 package can resolve newer transitive versions allowed by its own ranges. `doctor.sh`
 checks configured specs, installed top-level versions, OAuth commit/dirty state, and
-isolated load health; it does not hash every installed npm implementation byte.
+isolated load health; it does not hash every installed npm implementation byte. OAuth
+v0.3.2 honors Pi's request-body/tool-choice hooks, preserves required betas while rejecting
+fine-grained tool streaming, and records the returned fallback model with its own pricing.
 
 ### Anthropic prompt-cache policy
 
@@ -201,7 +203,7 @@ parent session shutdown.
 | Extension | Behavior | User surface |
 |---|---|---|
 | `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:off`; appends a display-only plain-language version | default off; `/present on\|off` |
-| `fast-mode.ts` | Adds Anthropic `speed: "fast"` for supported Opus models | `/fast` |
+| `fast-mode.ts` | Adds only Anthropic `speed: "fast"` and its beta; OAuth v0.3.2 merges required betas and blocks fine-grained streaming | `/fast` |
 | `statusline.ts` | Shows cwd, git branch, model, effort, context, cost, and Anthropic 5-hour/7-day limits | footer; `/limits` |
 
 `present.ts` is a Pi port of the display-only and fail-open design from

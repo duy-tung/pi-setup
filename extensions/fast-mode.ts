@@ -18,21 +18,16 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+// OAuth fork v0.3.2 unions this with its required OAuth/interleaved/cache
+// betas and rejects fine-grained tool streaming, so this extension owns only
+// the one beta that belongs to fast mode itself.
 const FAST_BETA = "fast-mode-2026-02-01";
-// pi's own betas for an OAuth (subscription) session. They are set as client
-// default headers, and `optionsHeaders` — which is where this extension writes —
-// overwrites the whole header, so the list has to be restated, not appended to.
-const OAUTH_BETAS = ["claude-code-20250219", "oauth-2025-04-20"];
-// Added by pi whenever tools are present and the model lacks eager tool input
-// streaming, which is the case for every model fast mode supports.
-const FINE_GRAINED_BETA = "fine-grained-tool-streaming-2025-05-14";
 
 // Opus 4.7 and earlier lost fast mode on 2026-07-24: sending speed there is a
 // hard error, not a downgrade, so the gate is an allowlist.
 const SUPPORTED = /^claude-opus-(5|4-8)(-|$)/;
 
 let enabled = process.env.PI_FAST_MODE === "1";
-let isOAuth: boolean | null = null;
 
 const supported = (id: string | undefined) => !!id && SUPPORTED.test(id);
 
@@ -41,27 +36,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui?.setStatus?.("fast-mode", enabled ? "⚡ fast" : undefined);
 	};
 
-	const resolveAuth = async (ctx: any) => {
-		try {
-			const key = await ctx.modelRegistry.getApiKeyForProvider("anthropic");
-			isOAuth = !!key?.startsWith("sk-ant-oat");
-		} catch {
-			isOAuth = null;
-		}
-	};
-
-	pi.on("session_start", async (_e, ctx) => {
-		await resolveAuth(ctx);
-		showStatus(ctx);
-	});
-	// Re-resolved on model change too: a /login mid-session can move the provider
-	// between API-key and OAuth, and a value cached at session_start would keep
-	// sending the wrong beta set until restart. (A /login with no model switch is
-	// still stale until the next one — the unknown state defaults to OAuth betas,
-	// which is the harmless direction.)
-	pi.on("model_select", async (_e, ctx) => {
-		await resolveAuth(ctx);
-	});
+	pi.on("session_start", (_e, ctx) => showStatus(ctx));
 
 	pi.on("before_provider_request", (e, ctx) => {
 		if (!enabled) return;
@@ -81,8 +56,6 @@ export default function (pi: ExtensionAPI) {
 				for (const b of v.split(",")) if (b.trim()) betas.add(b.trim());
 			}
 		}
-		if (isOAuth !== false) for (const b of OAUTH_BETAS) betas.add(b);
-		betas.add(FINE_GRAINED_BETA);
 		betas.add(FAST_BETA);
 		e.headers["anthropic-beta"] = Array.from(betas).join(",");
 	});

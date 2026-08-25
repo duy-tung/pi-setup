@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,9 +106,9 @@ test("repository audit rejects nested runtime trees, generated output, secrets, 
 
 test("settings pin the runtime package manager, default tools, and every external package", () => {
   const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
-  assert.deepEqual(settings.npmCommand, ["mise", "-C", "/", "exec", "node@24.15.0", "--", "npm"]);
+  assert.deepEqual(settings.npmCommand, ["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"]);
   assert.deepEqual(settings.packages, [
-    "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",
+    "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
     "npm:pi-web-search@1.3.1",
     "npm:@upstash/context7-pi@0.1.2",
   ]);
@@ -117,6 +117,20 @@ test("settings pin the runtime package manager, default tools, and every externa
   const mise = readFileSync(join(root, "mise.toml"), "utf8");
   assert.match(mise, /node = "24\.15\.0"/);
   assert.match(mise, /PI_CACHE_RETENTION = "long"/);
+});
+
+test("configured npm wrapper ignores project config without changing package cwd", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "pi-npm-cwd-"));
+  try {
+    writeFileSync(join(fixture, "package.json"), "{}\n");
+    const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
+    const [command, ...args] = settings.npmCommand;
+    const result = spawnSync(command, [...args, "prefix"], { cwd: fixture, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(realpathSync.native(result.stdout.trim()), realpathSync.native(fixture));
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("tree-rewind is a bundled Pi package rather than an external link", () => {
@@ -128,6 +142,19 @@ test("tree-rewind is a bundled Pi package rather than an external link", () => {
   assert.equal(pkg.name, "pi-tree-rewind");
   assert.equal(pkg.version, "0.3.1");
   assert.deepEqual(pkg.pi.extensions, ["./src/index.ts"]);
+});
+
+test("installer rebuilds transactional package stores from every exact pin", () => {
+  const source = readFileSync(join(root, "install.sh"), "utf8");
+  assert.match(source, /pi install "\$spec" --no-approve/);
+  assert.equal(source.includes("pi update --extensions"), false);
+  for (const spec of [
+    "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
+    "npm:pi-web-search@1.3.1",
+    "npm:@upstash/context7-pi@0.1.2",
+  ]) {
+    assert.equal(source.includes(`"${spec}"`), true, `missing installer pin ${spec}`);
+  }
 });
 
 test("doctor requires exact package-spec lines rather than version prefixes", () => {
