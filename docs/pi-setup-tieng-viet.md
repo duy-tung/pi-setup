@@ -26,10 +26,11 @@ Installer sẽ:
 
 1. pin Node `24.15.0` trong global mise config;
 2. set global `PI_CACHE_RETENTION=long`;
-3. cài exact `@earendil-works/pi-coding-agent@0.84.3`;
-4. backup rồi áp dụng sáu resource được quản lý;
-5. cài/reconcile ba package đã pin;
-6. chạy test, tree-rewind backend suite và no-cost offline startup smoke.
+3. set global `PI_ANTHROPIC_OAUTH_REWRITE_MODE=technical-safe`;
+4. cài exact `@earendil-works/pi-coding-agent@0.84.3`;
+5. backup rồi áp dụng sáu resource được quản lý;
+6. cài/reconcile ba package đã pin;
+7. chạy test, tree-rewind backend suite và no-cost offline startup smoke.
 
 Sau đó mở `pi` và dùng `/login` cho Anthropic và Codex. Không copy credentials qua Git.
 Trust decision cũng phải tạo lại theo từng project.
@@ -71,6 +72,11 @@ OAuth fork vẫn là dependency GitHub ngoài repo và được fetch theo tag c
 có thể đổi trong range package upstream cho phép. Doctor không hash toàn bộ installed bytes.
 OAuth v0.3.2 honors request-body/tool-choice hooks, merge required betas nhưng loại
 fine-grained tool streaming, và ghi đúng returned fallback model cùng pricing của nó.
+Setup pin `PI_ANTHROPIC_OAUTH_REWRITE_MODE=technical-safe`: standalone identity `Pi` vẫn có
+thể thành `Claude Code` theo yêu cầu OAuth, nhưng `.pi`, `pi-setup` và ordinary path được giữ
+nguyên. Provider vẫn loại paragraph chứa fixed Pi-identity anchors trước bước regex; mode này
+không thay behavior riêng đó. Narrow `~/.Claude Code/agent` alias chỉ còn là fallback. Pi
+process đang mở phải đóng/mở lại để nhận global env mới; `/reload` không đủ.
 
 ## 3. Phạm vi repo và dữ liệu private
 
@@ -347,6 +353,11 @@ thuộc trust; global managed resources không tự sync chỉ vì repo đã tha
 
 Kiểm `PI_CACHE_RETENTION=long`, exact OAuth tag, process/sleep gap và cache-read telemetry.
 Không tắt notice để giả vờ sửa cache.
+
+### OAuth rewrite làm sai project path
+
+Chạy `./doctor.sh`; nó kiểm global mise env và probe provider thật. Expected mode là
+`technical-safe`. Không dựa vào narrow `~/.Claude Code/agent` alias để che project path bị đổi.
 
 ### Presentation không hiện
 

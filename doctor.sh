@@ -4,6 +4,7 @@ set -euo pipefail
 
 NODE_VERSION="24.15.0"
 PI_VERSION="0.84.3"
+OAUTH_REWRITE_MODE="technical-safe"
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
 HOME_REAL="$(CDPATH= cd -- "$HOME" && pwd -P)"
@@ -77,6 +78,8 @@ pi_version="$("$MISE" --quiet -C / exec "node@$NODE_VERSION" -- pi --version)"
 [ "$pi_version" = "$PI_VERSION" ] || fail "expected Pi $PI_VERSION, got $pi_version"
 cache_value="$(env -u PI_CACHE_RETENTION "$MISE" --quiet -C / exec "node@$NODE_VERSION" -- sh -c 'printf %s "${PI_CACHE_RETENTION-}"')"
 [ "$cache_value" = "long" ] || fail "global mise environment does not set PI_CACHE_RETENTION=long"
+rewrite_value="$(env -u PI_ANTHROPIC_OAUTH_REWRITE_MODE "$MISE" --quiet -C / exec "node@$NODE_VERSION" -- sh -c 'printf %s "${PI_ANTHROPIC_OAUTH_REWRITE_MODE-}"')"
+[ "$rewrite_value" = "$OAUTH_REWRITE_MODE" ] || fail "global mise environment does not set PI_ANTHROPIC_OAUTH_REWRITE_MODE=$OAUTH_REWRITE_MODE"
 
 list_output="$("$MISE" --quiet -C / exec "node@$NODE_VERSION" -- pi list)"
 for spec in \
@@ -90,6 +93,12 @@ done
 oauth_store="$AGENT_DIR/git/github.com/duy-tung/pi-anthropic-oauth-plus"
 [ "$(git -C "$oauth_store" rev-parse HEAD 2>/dev/null || true)" = "1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49" ] || fail "installed OAuth checkout is not the v0.3.2 commit"
 [ -z "$(git -C "$oauth_store" status --porcelain --untracked-files=all 2>/dev/null || printf dirty)" ] || fail "installed OAuth checkout has tracked modifications"
+rewrite_probe="$(env -u PI_ANTHROPIC_OAUTH_REWRITE_MODE "$MISE" --quiet -C / exec "node@$NODE_VERSION" -- node --experimental-strip-types --input-type=module -e '
+import { pathToFileURL } from "node:url";
+const { sanitizeSystemText } = await import(pathToFileURL(process.argv[1]).href);
+process.stdout.write(sanitizeSystemText("Pi uses /tmp/example/pi-setup and ~/.pi/agent."));
+' "$oauth_store/src/prompt.ts")" || fail "unable to probe installed OAuth prompt rewrite"
+[ "$rewrite_probe" = "Claude Code uses /tmp/example/pi-setup and ~/.pi/agent." ] || fail "OAuth prompt rewrite does not preserve technical paths under $OAUTH_REWRITE_MODE mode"
 web_meta="$AGENT_DIR/npm/node_modules/pi-web-search/package.json"
 context_meta="$AGENT_DIR/npm/node_modules/@upstash/context7-pi/package.json"
 installed_versions="$("$MISE" -C / exec "node@$NODE_VERSION" -- node -e '

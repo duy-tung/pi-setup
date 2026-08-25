@@ -136,8 +136,12 @@ if (JSON.stringify(settings.npmCommand) !== JSON.stringify(expectedNpm)) fail("s
 if (JSON.stringify(settings.packages) !== JSON.stringify(expectedPackages)) fail("settings.json package list is not exactly pinned");
 if (JSON.stringify(settings.defaultTools) !== JSON.stringify(expectedDefaultTools)) fail("settings.json default tool list is not exactly pinned");
 const mise = readFileSync(join(root, "mise.toml"), "utf8");
-if (!/^node = "24\.15\.0"$/m.test(mise) || !/^PI_CACHE_RETENTION = "long"$/m.test(mise)) {
-  fail("mise.toml does not pin Node and long cache retention");
+if (
+  !/^node = "24\.15\.0"$/m.test(mise)
+  || !/^PI_CACHE_RETENTION = "long"$/m.test(mise)
+  || !/^PI_ANTHROPIC_OAUTH_REWRITE_MODE = "technical-safe"$/m.test(mise)
+) {
+  fail("mise.toml does not pin Node, long cache retention, and technical-safe OAuth prompt rewriting");
 }
 
 const managed = readFileSync(join(root, "scripts", "managed-paths.txt"), "utf8").trim().split("\n");

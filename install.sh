@@ -7,6 +7,7 @@ NODE_VERSION="24.15.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
 PI_VERSION="0.84.3"
 OAUTH_COMMIT="1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49"
+OAUTH_REWRITE_MODE="technical-safe"
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
@@ -327,9 +328,10 @@ if [ "$MODE" = "full" ]; then
   fi
   RUNTIME_ROLLBACK_NEEDED=1
 
-  printf '%s\n' "==> Pinning Node $NODE_VERSION and long cache retention with mise"
+  printf '%s\n' "==> Pinning Node $NODE_VERSION, long cache retention, and technical-safe OAuth prompt rewriting with mise"
   "$MISE" -C / use --global --pin --yes "node@$NODE_VERSION"
   "$MISE" -C / set --global PI_CACHE_RETENTION=long
+  "$MISE" -C / set --global "PI_ANTHROPIC_OAUTH_REWRITE_MODE=$OAUTH_REWRITE_MODE"
   if [ "$PI_WAS_PRESENT" -eq 1 ] && [ "$PI_PREVIOUS_VERSION" = "$PI_VERSION" ]; then
     printf '%s\n' "==> $PI_PACKAGE@$PI_VERSION is already installed"
   else

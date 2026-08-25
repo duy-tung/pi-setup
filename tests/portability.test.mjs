@@ -117,6 +117,12 @@ test("settings pin the runtime package manager, default tools, and every externa
   const mise = readFileSync(join(root, "mise.toml"), "utf8");
   assert.match(mise, /node = "24\.15\.0"/);
   assert.match(mise, /PI_CACHE_RETENTION = "long"/);
+  assert.match(mise, /PI_ANTHROPIC_OAUTH_REWRITE_MODE = "technical-safe"/);
+
+  const installer = readFileSync(join(root, "install.sh"), "utf8");
+  assert.match(installer, /set --global "PI_ANTHROPIC_OAUTH_REWRITE_MODE=\$OAUTH_REWRITE_MODE"/);
+  const doctor = readFileSync(join(root, "doctor.sh"), "utf8");
+  assert.match(doctor, /sanitizeSystemText\("Pi uses \/tmp\/example\/pi-setup and ~\/\.pi\/agent\."\)/);
 });
 
 test("configured npm wrapper ignores project config without changing package cwd", () => {

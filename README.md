@@ -33,8 +33,9 @@ cd ~/repos/pi-setup
 ./install.sh
 ```
 
-`install.sh` pins Node/Pi and three top-level package versions, applies only the
-managed config, and runs no-cost verification. Replaced config is backed up under
+`install.sh` pins Node/Pi, three top-level package versions, long cache retention,
+and technical-safe OAuth prompt rewriting; it then applies only the managed config and
+runs no-cost verification. Replaced config is backed up under
 `~/.local/state/pi-setup/backups/`. Normal errors and catchable signals restore
 managed config, selected mise config/Pi version, and configured package stores;
 a prior different Pi version is reconstructed from npm rather than byte-restored.
@@ -92,6 +93,7 @@ after its authority and trust-boundary findings were fixed.
 - exact initial built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` (no PowerShell);
 - default provider/model: Anthropic, `claude-fable-5`;
 - Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.2`;
+- global OAuth identity rewriting pinned to `technical-safe`: standalone `Pi` identity text may become `Claude Code`, while `.pi`, `pi-setup`, and ordinary paths remain literal;
 - default thinking: `xhigh`; `/model` and `/thinking` changes stay session-local unless Ctrl+S explicitly saves a global default;
 - enabled model families: Claude Fable/Opus/Sonnet/Haiku and
   `openai-codex/gpt-5.6-*`;
@@ -132,9 +134,14 @@ Use `/compact`, a handoff, or a new session for overnight breaks instead of warm
 cache indefinitely. Pi's `Cache miss after … idle` label compares visible request
 timestamps and does not account for hidden keepalive pings.
 
-The provider's aggressive OAuth identity rewrite may turn `~/.pi/agent` into
-`~/.Claude Code/agent`. New installations create only that narrow agent-directory
-alias; an existing legacy whole-`~/.pi` alias is not silently changed.
+The provider still identifies the OAuth client as Claude Code, but the setup pins
+`PI_ANTHROPIC_OAUTH_REWRITE_MODE=technical-safe` globally through mise. This rewrites
+standalone identity prose without mutating technical tokens such as `~/.pi/agent` or
+`pi-setup`. The provider still removes paragraphs containing its fixed Pi-identity anchors
+before this regex runs; `technical-safe` does not alter that separate compatibility behavior.
+The narrow `~/.Claude Code/agent` alias remains a fallback; an existing legacy whole-`~/.pi`
+alias is not silently changed. Because environment variables are inherited at process start,
+close and reopen an already-running Pi after a full install; `/reload` alone is insufficient.
 
 ## Extensions
 
