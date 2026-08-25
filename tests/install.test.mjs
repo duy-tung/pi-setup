@@ -279,7 +279,7 @@ test("failed package reconciliation restores prior Pi package stores", () => {
     write(miseConfig, "ORIGINAL-MISE-CONFIG\n", 0o600);
     const npmRoot = join(f.home, "fake-global", "lib", "node_modules");
     const piMeta = join(npmRoot, "@earendil-works", "pi-coding-agent", "package.json");
-    write(piMeta, JSON.stringify({ version: "0.84.2" }));
+    write(piMeta, JSON.stringify({ version: "0.84.3" }));
     write(join(f.agent, "npm", "old-sentinel"), "OLD-NPM\n");
     const oauthStore = join(f.agent, "git", "github.com", "duy-tung", "pi-anthropic-oauth-plus");
     write(join(oauthStore, "old-sentinel"), "OLD-OAUTH\n");

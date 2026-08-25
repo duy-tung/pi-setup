@@ -10,6 +10,15 @@
   "fullscreenScrollbar": "auto",
   "autocompleteMaxVisible": 10,
   "defaultProjectTrust": "ask",
+  "defaultTools": [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls"
+  ],
   "enableInstallTelemetry": false,
   "npmCommand": [
     "mise",
@@ -45,7 +54,7 @@
   "warnings": {
     "anthropicExtraUsage": false
   },
-  "lastChangelogVersion": "0.84.2",
+  "lastChangelogVersion": "0.84.3",
   "defaultModel": "claude-fable-5",
   "packages": [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1",

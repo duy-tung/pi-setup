@@ -8,7 +8,7 @@ This private repository is the source of truth for six managed resources under
 
 | Item | Value |
 |---|---|
-| Pi | `@earendil-works/pi-coding-agent` 0.84.2 |
+| Pi | `@earendil-works/pi-coding-agent` 0.84.3 |
 | Node | 24.15.0, managed by mise |
 | Subagent transport | Native Pi RPC (`--mode rpc`) |
 | Live config | `~/.pi/agent/` |
@@ -89,14 +89,16 @@ after its authority and trust-boundary findings were fixed.
 
 - portable npm wrapper: `mise -C / exec node@24.15.0 -- npm`;
 - exact external package pins, including npm versions;
+- exact initial built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` (no PowerShell);
 - default provider/model: Anthropic, `claude-fable-5`;
 - Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.1`;
-- default thinking: `xhigh`;
+- default thinking: `xhigh`; `/model` and `/thinking` changes stay session-local unless Ctrl+S explicitly saves a global default;
 - enabled model families: Claude Fable/Opus/Sonnet/Haiku and
   `openai-codex/gpt-5.6-*`;
 - fullscreen dark TUI with nvim as the external editor;
 - project-local trust policy: ask;
 - compaction enabled (`reserveTokens: 16384`, `keepRecentTokens: 32000`);
+- cache-miss notices enabled, including Pi 0.84.3 compaction and branch-summary usage notices;
 - retries enabled, with provider calls allowed up to one hour;
 - installation telemetry disabled.
 
@@ -326,6 +328,11 @@ git pull --ff-only
 ./install.sh
 ```
 
+Keep this installer as the runtime authority. This setup is a global npm installation under
+mise, not Pi's installer-managed layout, so Pi's managed atomic self-update path and
+`pi update --self` do not replace the repository pin, package reconciliation, doctor checks,
+or rollback transaction.
+
 If SIGKILL/power loss leaves `~/.local/state/pi-setup/operation.lock`, first
 confirm no install/sync process is alive, then remove that exact lock. Preserved
 `transactions/` or `sync-transactions/` contain before-images for manual recovery;
@@ -372,6 +379,8 @@ sandboxed parent process.
 
 - `ask-user.ts`, `todos.ts`, `goal.ts`, and `subagent.ts` register model tools, so their
   schemas consume context on every turn even when unused.
+- The explicit default tool set also enables `grep`, `find`, and `ls`: Plan/Manual gain direct
+  read-only search at the cost of three additional built-in schemas.
 - After `/present on`, `present.ts` sends each eligible long answer to OpenAI in a private
   ephemeral RPC call. Its per-rewrite cost is displayed but not added to parent totals; the
   feature resets to off on every session start/reload.
@@ -382,5 +391,5 @@ sandboxed parent process.
   SIGKILL can leave a fail-closed lock requiring confirmed manual removal.
 - `paste-image-attach.ts` touches a private TUI paste path and should be checked after Pi
   upgrades.
-- `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.2 internals;
+- `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.3 internals;
   re-audit them after major upgrades.

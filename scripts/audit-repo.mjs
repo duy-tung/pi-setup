@@ -131,8 +131,10 @@ const expectedPackages = [
   "npm:pi-web-search@1.3.1",
   "npm:@upstash/context7-pi@0.1.2",
 ];
+const expectedDefaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(settings.npmCommand) !== JSON.stringify(expectedNpm)) fail("settings.json npmCommand is not portable and pinned");
 if (JSON.stringify(settings.packages) !== JSON.stringify(expectedPackages)) fail("settings.json package list is not exactly pinned");
+if (JSON.stringify(settings.defaultTools) !== JSON.stringify(expectedDefaultTools)) fail("settings.json default tool list is not exactly pinned");
 const mise = readFileSync(join(root, "mise.toml"), "utf8");
 if (!/^node = "24\.15\.0"$/m.test(mise) || !/^PI_CACHE_RETENTION = "long"$/m.test(mise)) {
   fail("mise.toml does not pin Node and long cache retention");

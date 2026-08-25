@@ -104,7 +104,7 @@ test("repository audit rejects nested runtime trees, generated output, secrets, 
   }
 });
 
-test("settings pin the runtime package manager and every external package", () => {
+test("settings pin the runtime package manager, default tools, and every external package", () => {
   const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
   assert.deepEqual(settings.npmCommand, ["mise", "-C", "/", "exec", "node@24.15.0", "--", "npm"]);
   assert.deepEqual(settings.packages, [
@@ -112,6 +112,7 @@ test("settings pin the runtime package manager and every external package", () =
     "npm:pi-web-search@1.3.1",
     "npm:@upstash/context7-pi@0.1.2",
   ]);
+  assert.deepEqual(settings.defaultTools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
   const mise = readFileSync(join(root, "mise.toml"), "utf8");
   assert.match(mise, /node = "24\.15\.0"/);

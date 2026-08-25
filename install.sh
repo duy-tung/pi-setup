@@ -5,7 +5,7 @@ umask 077
 
 NODE_VERSION="24.15.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
-PI_VERSION="0.84.2"
+PI_VERSION="0.84.3"
 OAUTH_COMMIT="3dddb09bc5065d1362de9c747b35c6b3f016974a"
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -149,8 +149,10 @@ const expected = [
   "npm:pi-web-search@1.3.1",
   "npm:@upstash/context7-pi@0.1.2",
 ];
+const defaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(s.npmCommand) !== JSON.stringify(["mise", "-C", "/", "exec", "node@24.15.0", "--", "npm"])) throw new Error("portable npmCommand mismatch");
 if (JSON.stringify(s.packages) !== JSON.stringify(expected)) throw new Error("pinned package list mismatch");
+if (JSON.stringify(s.defaultTools) !== JSON.stringify(defaultTools)) throw new Error("default tool list mismatch");
 ' "$STAGE/settings.json"
 bash -n "$STAGE/scrub-session-secrets.sh"
 

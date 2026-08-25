@@ -16,7 +16,7 @@
  * session file keeps the originals forever.
  *
  * Mechanics: core reuses the same `preparation` object after the
- * session_before_compact event (agent-session.js:1389-1427, verified v0.84.2),
+ * session_before_compact event (AgentSession.compact/_runAutoCompaction, verified v0.84.3),
  * so in-place mutation of the preparation arrays is honored. The message
  * objects themselves are SHARED with the live session, so pruning replaces
  * array elements with shallow copies and never mutates an original — an

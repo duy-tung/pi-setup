@@ -26,7 +26,7 @@ Installer sẽ:
 
 1. pin Node `24.15.0` trong global mise config;
 2. set global `PI_CACHE_RETENTION=long`;
-3. cài exact `@earendil-works/pi-coding-agent@0.84.2`;
+3. cài exact `@earendil-works/pi-coding-agent@0.84.3`;
 4. backup rồi áp dụng sáu resource được quản lý;
 5. cài/reconcile ba package đã pin;
 6. chạy test, tree-rewind backend suite và no-cost offline startup smoke.
@@ -44,7 +44,7 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 | Thành phần | Pin |
 |---|---|
 | Node | `24.15.0` qua mise |
-| Pi | `@earendil-works/pi-coding-agent@0.84.2` |
+| Pi | `@earendil-works/pi-coding-agent@0.84.3` |
 | Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.1` |
 | Web search | `npm:pi-web-search@1.3.1` |
 | Context7 | `npm:@upstash/context7-pi@0.1.2` |
@@ -59,6 +59,10 @@ mise -C / exec node@24.15.0 -- npm
 `-C /` tránh phụ thuộc vào mise config/trust của project hiện tại. Repo có `mise.toml` để
 mô tả pin, nhưng installer không cần trust file đó để bootstrap. Transaction backup tôn trọng
 `MISE_GLOBAL_CONFIG_FILE` khi user override global config path.
+
+`defaultTools` pin exact `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Ba dedicated
+read-only tools làm Manual/Plan search được mà không cần Bash; PowerShell không active trên
+setup macOS này. Tradeoff là thêm ba tool schema vào model context.
 
 OAuth fork vẫn là dependency GitHub ngoài repo và được fetch theo tag cố định. “Một repo” ở
 đây nghĩa là chỉ cần clone một private setup repo; không vendor toàn bộ third-party packages.
@@ -133,6 +137,7 @@ Lệnh setup cần nhớ:
 |---|---|
 | `/reload` | Nạp lại source sau khi áp dụng config |
 | `/mode` | Chọn Auto, Manual, Accept edits, Plan hoặc Bypass tạm thời |
+| `/model`, `/thinking` | Đổi model/thinking cho session hiện tại; Ctrl+S mới lưu global default |
 | `/agents` | Xem/steer/resume/interrupt RPC children |
 | `/goal`, `/todos` | Long-running goal và task checklist |
 | `/tree`, `/rewind` | Conversation tree và worktree restore |
@@ -162,6 +167,10 @@ Auto/Manual/Accept edits/Plan đi theo active session branch. Bypass reset về 
 conversation-tree navigation đều bị chặn khi work child đang starting/running. Wait hoặc
 interrupt child trước.
 
+Pi 0.84.3 không còn tự ghi `/model` hoặc `/thinking` selection vào global settings. Enter chỉ
+đổi session; Ctrl+S mới persist. Vì `settings.json` do repo quản lý, chỉ dùng Ctrl+S khi chủ ý
+đổi default rồi capture thay đổi về repo.
+
 ## 5. Subagent và presentation
 
 Public API giữ cố định:
@@ -189,7 +198,8 @@ Với `PI_CACHE_RETENTION=long`, fork dùng TTL một giờ. Conversation thành
 
 Keepalive là request ẩn, không nằm trong transcript/footer cost. Qua đêm nên dùng `/compact`,
 `/handoff` hoặc session mới. Dòng `Cache miss after … idle` chỉ so visible request timestamps,
-không biết hidden ping.
+không biết hidden ping. Với `showCacheMissNotices: true`, Pi 0.84.3 còn hiển thị usage riêng
+của compaction và branch summary; không cần extension notice thứ hai.
 
 Debug tạm:
 
@@ -272,6 +282,10 @@ cd ~/repos/pi-setup
 git pull --ff-only
 ./install.sh
 ```
+
+Giữ `install.sh` làm runtime authority. Layout hiện tại là global npm qua mise, không phải Pi
+installer-managed (`PI_MANAGED_INSTALL_ROOT` không được set), nên managed atomic self-update
+và `pi update --self` không thay thế repo pin, package reconciliation, doctor hoặc rollback.
 
 Trước khi nâng Pi/package, đọc changelog và re-audit private APIs: Bash override,
 compaction-prune, paste-image editor method, RPC settlement/session state, presentation và

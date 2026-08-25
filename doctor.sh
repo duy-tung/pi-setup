@@ -3,7 +3,7 @@
 set -euo pipefail
 
 NODE_VERSION="24.15.0"
-PI_VERSION="0.84.2"
+PI_VERSION="0.84.3"
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
 HOME_REAL="$(CDPATH= cd -- "$HOME" && pwd -P)"

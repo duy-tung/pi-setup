@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { registerHooks } from "node:module";
-import { dirname, join } from "node:path";
+import { createRequire, registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 const piCli = realpathSync(execFileSync("which", ["pi"], { encoding: "utf8" }).trim());
-const piPackage = dirname(dirname(piCli));
-const tui = join(piPackage, "node_modules", "@earendil-works", "pi-tui", "dist", "index.js");
+const tui = createRequire(piCli).resolve("@earendil-works/pi-tui");
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@earendil-works/pi-tui") {
