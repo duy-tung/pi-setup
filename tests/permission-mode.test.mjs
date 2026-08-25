@@ -230,6 +230,23 @@ test("mode changes fail closed while the parent or a work child is active", asyn
   markWorkSubagentRunning("child-1", false);
 });
 
+test("subagent mode command explains fixed child scope without claiming parent-mode inheritance", async () => {
+  const previous = process.env.PI_SUBAGENT_DEPTH;
+  const f = fixture();
+  try {
+    process.env.PI_SUBAGENT_DEPTH = "1";
+    await f.emit("session_start", { reason: "startup" });
+    await f.commands.get("mode").handler("plan", f.ctx);
+    assert.equal(getPermissionMode(), "auto");
+    assert.match(f.notifications.at(-1).message, /child runtime default/);
+    assert.match(f.notifications.at(-1).message, /parent mode is not inherited/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+    else process.env.PI_SUBAGENT_DEPTH = previous;
+    resetPermissionRuntime();
+  }
+});
+
 test("Bypass cannot be restored from durable session state", async () => {
   const f = fixture();
   f.branch.push(stateEntry("bypass"));

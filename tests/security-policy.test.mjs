@@ -195,6 +195,34 @@ test("permission modes enforce the edit and Bash decision matrix", async () => {
   }
 });
 
+test("Auto asks once for common commit, push, delete, and deploy authority boundaries", async () => {
+  const f = fixture();
+  try {
+    const handler = captureHandler("auto");
+    const ctx = context(f.work, true);
+    const commands = [
+      "git commit -m checkpoint",
+      "git push origin main",
+      "rm output.txt",
+      "rmdir build",
+      "kubectl apply -f deploy.yaml",
+      "terraform apply plan.out",
+      "gh pr merge 42 --squash",
+    ];
+    for (const [index, command] of commands.entries()) {
+      assert.equal(await handler({ toolName: "bash", input: { command } }, ctx.value), undefined);
+      assert.equal(ctx.calls.length, index + 1);
+      assert.ok(ctx.calls.at(-1).message.includes(command));
+    }
+
+    assert.equal(await handler({ toolName: "bash", input: { command: "git status --short" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, commands.length, "read-only git status should stay prompt-free in Auto");
+  } finally {
+    f.cleanup();
+    resetPermissionRuntime();
+  }
+});
+
 test("Bypass skips prompts but preserves credential and write-boundary hard stops", async () => {
   const f = fixture();
   const external = mkdtempSync(join(homedir(), ".pi-policy-bypass-out-"));

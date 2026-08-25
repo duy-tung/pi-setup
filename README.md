@@ -15,7 +15,7 @@ This private repository is the source of truth for six managed resources under
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
 | Rewind source | Bundled package under `extensions/tree-rewind/` (imported from `65fa4fa`) |
 
-Current inventory: **17 extensions**, **6 skills**, and **5 prompt templates**.
+Current inventory: **18 extensions**, **6 skills**, and **5 prompt templates**.
 
 ## Install on another Mac
 
@@ -80,6 +80,10 @@ Pi discovers files under `extensions/`, `skills/`, and `prompts/` automatically.
 - treat task data as data, preserve user work, and require authority for external effects;
 - respect permission denials and protect credential paths.
 
+The repository-root `AGENTS.override.md` is intentionally not installed. Inside this source
+repo it replaces the identical project copy, so Pi loads the full managed global policy only
+once; on a bootstrap machine it tells the agent to read the tracked `AGENTS.md` explicitly.
+
 The policy was redesigned from four sources at pinned commits: mattpocock/skills
 `5b15a47`, addyosmani/agent-skills `5a5ea45`, kunchenguid/dotfiles `79d2d43`, and
 multica-ai/andrej-karpathy-skills `2c60614`. Five independent source audits were
@@ -110,7 +114,7 @@ after its authority and trust-boundary findings were fixed.
 |---|---|
 | `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3 request hooks, and server-side fallback pricing |
 | `pi-web-search@1.3.1` | Web search tools |
-| `@upstash/context7-pi@0.1.2` | Documentation lookup through Context7 |
+| `@upstash/context7-pi@0.1.2` | Context7 tools and explicit `/c7-docs`; its redundant package skill is filtered out |
 
 These are exact top-level pins, not a hermetic supply-chain lock: Pi's published npm
 package can resolve newer transitive versions allowed by its own ranges. `doctor.sh`
@@ -154,26 +158,31 @@ turn.
 | Extension | Behavior |
 |---|---|
 | `permission-mode.ts` | User-owned Auto, Manual, Accept edits, Plan, and transient Bypass modes; branch-local state and footer status through `/mode` or `Ctrl+Alt+M` |
-| `permission-gate.ts` | Single pre-execution owner: invariant credential/path denies, mode-aware one-call approvals, and defensive Plan/Bypass boundaries |
+| `permission-gate.ts` | Single pre-execution owner: invariant credential/path denies, mode-aware one-call approvals, common commit/push/delete/deploy patterns, and defensive Plan/Bypass boundaries |
+| `context-snapshots.ts` | Projects only the newest runtime and permission snapshot to each model call while preserving append-only session history |
 | `secret-guard.ts` | Best-effort known-pattern redaction of final text tool results before the normal transcript/provider path |
 | `sandbox-bash.ts` | Sequential per-call macOS Seatbelt confinement for Bash file writes and known credential reads, plus environment scrubbing; Plan has no writable roots, network remains unrestricted, and there is no agent escalation |
 | `spill.ts` | Stores output larger than 16 KiB as a private redacted artifact; unsafe raw core output is withheld, never exposed as a locator |
 | `compaction-prune.ts` | Trims oversized blocks before the compaction summarizer sees them |
-| `repeat-reminder.ts` | Detects identical repeated tool calls and injects escalating loop warnings |
-| `runtime-context.ts` | Adds changing facts such as cwd, branch, dirty state, and date without invalidating the system-prompt cache |
+| `repeat-reminder.ts` | Detects identical repeated tool calls and queues a separately marked runtime advisory instead of imitating a system tag inside tool output |
+| `runtime-context.ts` | Adds branch, dirty state, and date snapshots without duplicating Pi core's cwd system instruction |
 
 `/mode` opens a five-row selector; `Ctrl+Alt+M` opens the same UI. Auto is the default
-and preserves the prior low-friction policy. Manual asks once for every edit/write, every
-Bash call, and every mutation-capable work-child activation. Accept edits allows ordinary
+and stays low-friction while asking for recognized commit, push, deletion, publishing,
+deployment, and destructive command patterns. Pattern matching is deliberately not an
+exhaustive shell policy, so the model must still obey `AGENTS.md` authority rules. Manual
+asks once for every edit/write, every Bash call, and every mutation-capable work-child
+activation. Accept edits allows ordinary
 workspace edit/write calls but still asks for Bash, protected/outside writes, unknown
 side-effect tools, and work-child activation. Plan removes `bash`, `edit`, and `write`,
 blocks work children and unknown side-effect tools, and restores only the tools it disabled
 when leaving. Auto, Manual, Accept edits, and Plan follow the active session branch.
 
-Bypass requires an attended confirmation and active macOS Seatbelt. It skips soft prompts
-for the current runtime only; Bash stays workspace-confined, built-in protected/outside
-writes and credential access stay blocked, and RPC children retain their fixed independent
-policy. Reload, resume, fork, or a new session returns Bypass to Auto. Mode changes and
+Bypass requires an attended confirmation and active macOS Seatbelt. It skips gate prompts
+for the current runtime only; it is not authorization to commit, push, deploy, publish, or
+delete user work. Bash stays workspace-confined, built-in protected/outside writes and
+credential access stay blocked, and RPC children retain their fixed independent policy.
+Reload, resume, fork, or a new session returns Bypass to Auto. Mode changes and
 conversation-tree navigation are refused while a work child is starting/running.
 
 ### Interaction and orchestration
@@ -218,8 +227,9 @@ parent session shutdown.
 private one-shot `--mode rpc --no-session` child uses the exact Pi executable and fixed
 `openai-codex/gpt-5.6-sol:off` model with no tools, project resources, or durable child
 session. The answer travels over RPC stdin rather than a plaintext prompt file. Session/leaf
-generation guards, latest-wins cancellation, fenced-code validation, bounded output, and
-process-group teardown prevent stale rewrites from attaching to another turn. The custom
+generation guards, latest-wins cancellation, exact fenced-code checks, literal
+number/URL/path/inline-code validation, bounded output, and process-group teardown prevent
+mutated or stale rewrites from attaching to another turn. The custom
 entry shows per-rewrite model/token/cost metadata but does not add that usage to parent
 session totals. The original answer remains authoritative; any failure shows nothing.
 
@@ -375,11 +385,12 @@ Focused policy tests use Node's built-in runner:
 node --experimental-strip-types --test tests/*.test.mjs
 ```
 
-They cover the five-mode decision/persistence/tool-restoration matrix, canonical/symlink
-paths, one-call approvals, Seatbelt profile generation, safe spill fallback, RPC
-framing/dialog/process teardown, parent-scoped durable child
-state, fixed capability profiles, bounded/redacted child reports, private presentation
-RPC eligibility/ownership/cancellation/fenced-code behavior, repository portability, and
+They cover the five-mode decision/persistence/tool-restoration matrix, authority-sensitive
+Auto command prompts, canonical/symlink paths, Seatbelt profile generation, runtime snapshot
+projection, resource precedence, bounded skill prompts, safe spill fallback, RPC
+framing/dialog/process teardown, parent-scoped durable child state, fixed capability profiles,
+bounded/redacted child reports, private presentation literal/fence/ownership/cancellation
+behavior, repository portability, and
 installer rollback/runtime-state preservation. Bundled rewind backend tests run through
 `npm --prefix extensions/tree-rewind test`. Real Seatbelt e2e must run outside an already
 sandboxed parent process.
@@ -390,6 +401,8 @@ sandboxed parent process.
   schemas consume context on every turn even when unused.
 - The explicit default tool set also enables `grep`, `find`, and `ls`: Plan/Manual gain direct
   read-only search at the cost of three additional built-in schemas.
+- Context7's two tool schemas remain recurring prompt cost; its broad package skill is filtered
+  because the schemas already carry the resolve/query protocol, while `/c7-docs` stays explicit.
 - After `/present on`, `present.ts` sends each eligible long answer to OpenAI in a private
   ephemeral RPC call. Its per-rewrite cost is displayed but not added to parent totals; the
   feature resets to off on every session start/reload.

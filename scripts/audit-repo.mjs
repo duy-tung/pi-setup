@@ -129,7 +129,7 @@ const expectedNpm = ["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"]
 const expectedPackages = [
   "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
   "npm:pi-web-search@1.3.1",
-  "npm:@upstash/context7-pi@0.1.2",
+  { source: "npm:@upstash/context7-pi@0.1.2", skills: [] },
 ];
 const expectedDefaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(settings.npmCommand) !== JSON.stringify(expectedNpm)) fail("settings.json npmCommand is not portable and pinned");

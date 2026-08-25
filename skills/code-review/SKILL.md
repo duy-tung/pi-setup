@@ -10,7 +10,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
 Both axes run as **parallel subagents** so they do not pollute each other's context, then this skill aggregates their findings. Use the Pi subagent skill (`~/.pi/agent/skills/subagent/SKILL.md`): issue both `subagent` calls together with profile `explore` and `run_in_background: false`. Pi executes the independent tool calls concurrently and returns both reports in the same parent step.
 
-Ask the user where the spec/requirements live (issue tracker, spec file, ticket). If there is none, review the Standards axis only and note the Spec axis was skipped.
+Locate the spec/requirements using step 2. Ask the user only if those inspectable sources do not identify it. If there is no spec, review the Standards axis only and note that the Spec axis was skipped.
 
 ## Process
 
@@ -35,25 +35,7 @@ Look for the originating spec, in this order:
 
 Anything in the repo that documents how code should be written, such as `CODING_STANDARDS.md` or `CONTRIBUTING.md`.
 
-On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
-
-- **The repo overrides.** A documented repo standard always wins; where it endorses something the baseline would flag, suppress the smell.
-- **Always a judgement call.** Each smell is a labelled heuristic ("possible Feature Envy"), never a hard violation — and, like any standard here, skip anything tooling already enforces.
-
-Each smell reads *what it is* → *how to fix*; match it against the diff:
-
-- **Mysterious Name** — a function, variable, or type whose name doesn't reveal what it does or holds. → rename it; if no honest name comes, the design's murky.
-- **Duplicated Code** — the same logic shape appears in more than one hunk or file in the change. → extract the shared shape, call it from both.
-- **Feature Envy** — a method that reaches into another object's data more than its own. → move the method onto the data it envies.
-- **Data Clumps** — the same few fields or params keep travelling together (a type wanting to be born). → bundle them into one type, pass that.
-- **Primitive Obsession** — a primitive or string standing in for a domain concept that deserves its own type. → give the concept its own small type.
-- **Repeated Switches** — the same `switch`/`if`-cascade on the same type recurs across the change. → replace with polymorphism, or one map both sites share.
-- **Shotgun Surgery** — one logical change forces scattered edits across many files in the diff. → gather what changes together into one module.
-- **Divergent Change** — one file or module is edited for several unrelated reasons. → split so each module changes for one reason.
-- **Speculative Generality** — abstraction, parameters, or hooks added for needs the spec doesn't have. → delete it; inline back until a real need shows.
-- **Message Chains** — long `a.b().c().d()` navigation the caller shouldn't depend on. → hide the walk behind one method on the first object.
-- **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the real target direct.
-- **Refused Bequest** — a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
+Read and apply [STANDARDS-RUBRIC.md](./STANDARDS-RUBRIC.md). It contains the shared smell baseline, review axes, and severity vocabulary. Documented repository standards override its heuristic baseline, and tooling-enforced rules do not need manual findings.
 
 ### 4. Start both subagents in parallel
 
@@ -62,9 +44,9 @@ Issue both `subagent` calls in the same assistant message with profile `explore`
 **Standards sub-agent brief** — include:
 
 - The full diff command and commit list.
-- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full — the sub-agent has no other access to it.
-- The brief: "Report — per file/hunk where relevant — (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls — documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
-- Additionally: "Walk the diff along five axes — **correctness** (does it do what it claims; edge cases, error paths), **readability** (understandable without help), **architecture** (fits the existing structure; no needless abstraction), **security** (input validation, secrets, injection), **performance** (obvious N+1s, hot-loop waste). Label every finding with a severity: **Critical** (blocks merge — security hole, data loss, broken behaviour), **Important** (should fix before merge), or **Suggestion** (worth considering, not required). Lead with Critical/Important; don't bury a real issue under nits."
+- The exact resolved path to `STANDARDS-RUBRIC.md` beside this skill (normally `~/.pi/agent/skills/code-review/STANDARDS-RUBRIC.md`); tell the child to read it before reviewing instead of copying the rubric into the tool argument.
+- The list of standards-source files you found in step 3.
+- The brief: "Apply the rubric's axes and severity vocabulary. Per relevant file/hunk, report documented-standard violations with the cited rule and baseline smells with the quoted hunk. Distinguish hard violations from judgement calls, skip tooling-enforced rules, and lead with Critical/Important findings. Under 400 words."
 
 **Spec sub-agent brief** — include:
 

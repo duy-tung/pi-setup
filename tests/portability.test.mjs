@@ -110,7 +110,7 @@ test("settings pin the runtime package manager, default tools, and every externa
   assert.deepEqual(settings.packages, [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
     "npm:pi-web-search@1.3.1",
-    "npm:@upstash/context7-pi@0.1.2",
+    { source: "npm:@upstash/context7-pi@0.1.2", skills: [] },
   ]);
   assert.deepEqual(settings.defaultTools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
@@ -166,6 +166,7 @@ test("installer rebuilds transactional package stores from every exact pin", () 
 test("doctor requires exact package-spec lines rather than version prefixes", () => {
   const source = readFileSync(join(root, "doctor.sh"), "utf8");
   assert.match(source, /grep -Fxq "  \$spec"/);
+  assert.match(source, /"  \$context7_spec \(filtered\)"/);
   assert.equal(source.includes('grep -Fq "$spec"'), false);
 });
 

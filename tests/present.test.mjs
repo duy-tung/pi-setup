@@ -23,7 +23,9 @@ const {
   PRESENT_SYSTEM_PROMPT,
   buildPresentCliArgs,
   preservesFencedBlocks,
+  preservesProtectedLiterals,
   proseLength,
+  protectedLiterals,
   registerPresent,
   scanFencedBlocks,
 } = await import("../extensions/present.ts");
@@ -254,6 +256,30 @@ test("fenced-code validation is exact and incomplete fences are ineligible", () 
   assert.equal(proseLength(`${longText()}\n\`\`\`ts\nunclosed`), 0);
 });
 
+test("literal validation preserves inline code, URLs, paths, and numbers", () => {
+  const source = [
+    "Use `pi --version` with v0.84.3.",
+    "Read /tmp/example/pi-setup/config.json and src/index.ts.",
+    "See https://example.com/docs/v2 and keep 42%.",
+  ].join("\n");
+  const rewrite = [
+    "Keep 42% and use `pi --version` with v0.84.3.",
+    "Read src/index.ts and /tmp/example/pi-setup/config.json.",
+    "Documentation: https://example.com/docs/v2.",
+  ].join("\n");
+  assert.deepEqual(protectedLiterals(source), protectedLiterals(rewrite));
+  assert.equal(preservesProtectedLiterals(source, rewrite), true);
+  for (const changed of [
+    rewrite.replace("`pi --version`", "`pi -V`"),
+    rewrite.replace("v0.84.3", "v0.84.4"),
+    rewrite.replace("/tmp/example/pi-setup/config.json", "/tmp/example/config.json"),
+    rewrite.replace("https://example.com/docs/v2", "https://example.com/docs/v3"),
+    rewrite.replace("42%", "43%"),
+  ]) {
+    assert.equal(preservesProtectedLiterals(source, changed), false);
+  }
+});
+
 test("present is off by default and non-TUI or delegated modes never start a child", async () => {
   const h = harness();
   await h.emit("session_start", { reason: "startup" });
@@ -350,7 +376,7 @@ test("source eligibility rejects partial, short, code-only, and oversized answer
   }
 });
 
-test("wrong child model and mutated fenced code fail open", async (t) => {
+test("wrong child model and mutated protected content fail open", async (t) => {
   await t.test("wrong model", async () => {
     const h = harness({ childState: { model: { provider: "openai-codex", id: "wrong" } } });
     await enable(h);
@@ -368,6 +394,17 @@ test("wrong child model and mutated fenced code fail open", async (t) => {
     await h.emit("agent_settled");
     const child = await waitForPrompt(h);
     child.complete(source.message.content[0].text.replace("const n = 1", "const n = 2"));
+    await h.controller.waitForIdle();
+    assert.equal(h.entries.length, 0);
+  });
+
+  await t.test("mutated literal", async () => {
+    const source = sourceEntry("literal", `${longText()} Use \`pi --version\` at /tmp/pi-setup with v0.84.3.`);
+    const h = harness({ source });
+    await enable(h);
+    await h.emit("agent_settled");
+    const child = await waitForPrompt(h);
+    child.complete(source.message.content[0].text.replace("v0.84.3", "v0.84.4"));
     await h.controller.waitForIdle();
     assert.equal(h.entries.length, 0);
   });

@@ -1,5 +1,5 @@
 ---
-description: Grill me relentlessly about a plan, decision, or idea until it holds up
+description: Stress-test a plan, decision, or idea through a bounded design-tree interview
 argument-hint: "[topic]"
 ---
 Read and apply ~/.pi/agent/skills/grilling/SKILL.md.

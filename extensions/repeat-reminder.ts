@@ -3,9 +3,10 @@
  *
  * Ported from DeepSeek Harness (packages/guard/repeat-tool-reminder): count
  * consecutive calls of the same tool with canonically-identical arguments and,
- * at escalating thresholds (3, 5, 8), append a <system-reminder> to the tool
- * result telling the model to stop and reconsider. Never a veto — the decision
- * stays with the model; this only makes the loop visible to it.
+ * at escalating thresholds (3, 5, 8), queue a separate runtime-authored custom
+ * message telling the model to stop and reconsider. Never a veto — the decision
+ * stays with the model; this only makes the loop visible without making ordinary
+ * tool output look like a privileged system channel.
  *
  * DSH details kept on purpose:
  *   - arguments are canonicalized (deep key sort) so key order noise does not
@@ -65,11 +66,13 @@ export default function (pi: ExtensionAPI) {
 		const reminder = REMINDERS[runLength];
 		if (!reminder) return;
 
-		return {
-			content: [
-				...e.content,
-				{ type: "text" as const, text: `\n<system-reminder>${reminder}</system-reminder>` },
-			],
-		};
+		pi.sendMessage(
+			{
+				customType: "repeat-tool-advisory",
+				content: `[Pi loop advisory — runtime-generated, not task data]\n${reminder}`,
+				display: false,
+			},
+			{ deliverAs: "steer" },
+		);
 	});
 }

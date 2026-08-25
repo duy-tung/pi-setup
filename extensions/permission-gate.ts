@@ -24,6 +24,12 @@ export const CONFIRM_CMD: { id: string; re: RegExp; what: string }[] = [
   },
   { id: "find-delete", re: /\bfind\b[^\n|;]*\s-delete\b/, what: "find -delete (bulk delete)" },
   { id: "xargs-rm", re: /\bxargs\b[^\n|;]*\brm\b/, what: "xargs rm (bulk delete)" },
+  { id: "delete", re: /\b(rm|rmdir)\b/, what: "file or directory deletion" },
+  {
+    id: "git-commit-push",
+    re: /\bgit\b[^\n|;&]*\b(commit|push)\b/,
+    what: "git commit/push (persistent or remote change)",
+  },
   {
     id: "git-destructive",
     re: /\bgit\s+(push\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b|--delete\b|\s:\S)|reset\s+--hard\b|clean\s+(-[a-zA-Z]*f|--force)|branch\s+(-D\b|--delete\s+--force))/,
@@ -43,6 +49,11 @@ export const CONFIRM_CMD: { id: string; re: RegExp; what: string }[] = [
     id: "pipe-to-shell",
     re: /\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?\S*(sh|bash|zsh)\b/,
     what: "piping a download into a shell",
+  },
+  {
+    id: "deploy-remote",
+    re: /\b(kubectl\s+(apply|create|delete|replace|patch|set|rollout|scale)|helm\s+(install|upgrade|uninstall|rollback)|terraform\s+(apply|destroy|import|taint|untaint)|pulumi\s+(up|destroy|import)|vercel\s+(deploy|--prod)|(?:fly|flyctl)\s+deploy|railway\s+up|wrangler\s+(deploy|publish|delete)|serverless\s+(deploy|remove)|docker\s+push|gh\s+(release\s+(create|delete)|repo\s+delete|pr\s+merge))\b/,
+    what: "deployment or remote mutation",
   },
   { id: "power", re: /\b(shutdown|reboot|halt)\b/, what: "shutdown/reboot" },
   { id: "publish", re: /\b(npm|pnpm|yarn)\s+publish\b/, what: "package publish (public, irreversible)" },

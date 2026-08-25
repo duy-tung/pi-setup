@@ -25,11 +25,12 @@ import {
   type PermissionMode,
 } from "./lib/permission-mode.ts";
 import { SEATBELT_AVAILABLE } from "./lib/seatbelt.ts";
+import { PERMISSION_MODE_CONTEXT_TYPE, setCurrentContextSnapshot } from "./context-snapshots.ts";
 
 const STATE_TYPE = "permission-mode-state";
 const STATE_VERSION = 1;
-const CONTEXT_TYPE = "permission-mode-context";
-const IS_SUBAGENT = Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;
+const CONTEXT_TYPE = PERMISSION_MODE_CONTEXT_TYPE;
+const isSubagent = () => Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;
 
 type DurablePermissionMode = Exclude<PermissionMode, "bypass">;
 
@@ -98,7 +99,7 @@ function lastModeContext(entries: readonly unknown[]): string | null {
 function modeContext(mode: PermissionMode): string {
   const policy: Record<PermissionMode, string> = {
     auto:
-      "Low-risk workspace edits and ordinary sandboxed Bash may run automatically. High-risk, destructive, protected, or outside operations require approval; credential access remains blocked.",
+      "Low-risk workspace edits and ordinary sandboxed Bash may run automatically. The gate asks for known commit, push, delete, publish, deploy, destructive, protected, and outside-write patterns; credential access remains blocked. Pattern coverage is not exhaustive: follow AGENTS and obtain direct user authorization for every other irreversible or external action.",
     manual:
       "Dedicated read-only tools may run automatically. Every file edit, every Bash call, and each mutation-capable delegation requires one user approval before it runs.",
     "accept-edits":
@@ -106,7 +107,7 @@ function modeContext(mode: PermissionMode): string {
     plan:
       "This is enforced read-only planning mode. Explore and produce a concrete plan only. Bash/edit/write are unavailable, work subagents are blocked, and unknown side-effect tools are blocked.",
     bypass:
-      "Approval prompts are skipped for this session. This does not disable safety boundaries: Bash remains workspace-confined, built-in writes outside/protected areas are blocked, and credential access remains blocked.",
+      "Gate approval prompts are skipped for this session, but Bypass is not user authorization to commit, push, deploy, publish, or delete user work; the authority rules in AGENTS still apply. Bash remains workspace-confined, built-in writes outside/protected areas are blocked, and credential access remains blocked.",
   };
   return `Current permission mode: ${mode}. This supersedes earlier permission-mode context.\n\n${policy[mode]}`;
 }
@@ -134,6 +135,7 @@ function styledStatus(ctx: ExtensionContext, mode: PermissionMode): string {
 }
 
 function updateStatus(ctx: ExtensionContext): void {
+  setCurrentContextSnapshot(CONTEXT_TYPE, modeContext(getPermissionMode()));
   if (ctx.mode !== "tui") return;
   ctx.ui.setStatus("permission-mode", styledStatus(ctx, getPermissionMode()));
 }
@@ -229,7 +231,7 @@ export default function permissionModeExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    const target = IS_SUBAGENT
+    const target = isSubagent()
       ? DEFAULT_PERMISSION_MODE
       : (persistedState(branch)?.mode ?? DEFAULT_PERMISSION_MODE);
     const previous = getPermissionMode();
@@ -311,8 +313,8 @@ export default function permissionModeExtension(pi: ExtensionAPI): void {
   }
 
   async function handleMode(raw: string, ctx: ExtensionContext): Promise<void> {
-    if (IS_SUBAGENT) {
-      ctx.ui.notify("Permission mode is fixed by the parent for this subagent activation.", "warning");
+    if (isSubagent()) {
+      ctx.ui.notify("Permission mode is fixed to the child runtime default; the parent selected this child's tool profile, but parent mode is not inherited.", "warning");
       return;
     }
     if (!ctx.isIdle()) {
@@ -362,6 +364,7 @@ export default function permissionModeExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", () => {
     const content = modeContext(getPermissionMode());
+    setCurrentContextSnapshot(CONTEXT_TYPE, content);
     if (content === lastEmitted) return;
     lastEmitted = content;
     return {

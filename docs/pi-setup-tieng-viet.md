@@ -48,7 +48,7 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 | Pi | `@earendil-works/pi-coding-agent@0.84.3` |
 | Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2` |
 | Web search | `npm:pi-web-search@1.3.1` |
-| Context7 | `npm:@upstash/context7-pi@0.1.2` |
+| Context7 | `npm:@upstash/context7-pi@0.1.2`; giữ tools và `/c7-docs`, filter package skill trùng lặp |
 | tree-rewind | bundled package `extensions/tree-rewind/`, provenance `65fa4fa` |
 
 `settings.json` gọi npm qua:
@@ -64,7 +64,9 @@ trọng `MISE_GLOBAL_CONFIG_FILE` khi user override global config path.
 
 `defaultTools` pin exact `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Ba dedicated
 read-only tools làm Manual/Plan search được mà không cần Bash; PowerShell không active trên
-setup macOS này. Tradeoff là thêm ba tool schema vào model context.
+setup macOS này. Tradeoff là thêm ba tool schema vào model context. Context7 dùng package
+object filter `skills: []`: hai tool schema và explicit `/c7-docs` vẫn còn, nhưng broad package
+skill description không lặp trong mỗi system prompt.
 
 OAuth fork vẫn là dependency GitHub ngoài repo và được fetch theo tag cố định. “Một repo” ở
 đây nghĩa là chỉ cần clone một private setup repo; không vendor toàn bộ third-party packages.
@@ -90,6 +92,10 @@ extensions
 skills
 prompts
 ```
+
+Root `AGENTS.override.md` chỉ dành cho source repo và không nằm trong allowlist. Nó ngăn Pi
+load cùng policy hai lần từ global `~/.pi/agent/AGENTS.md` và tracked `AGENTS.md`; máy bootstrap
+chưa có global copy được chỉ dẫn đọc tracked source đầy đủ. Installer không copy override.
 
 Không bao giờ đưa vào repo hoặc thay thế khi cài:
 
@@ -140,6 +146,9 @@ Workflow ngắn:
 5. dùng `/handoff` trước khi dừng task chưa xong;
 6. xem preview/coverage trước `/tree` hoặc `/rewind` restore.
 
+`/grill` chỉ hỏi tối đa bốn material decisions mỗi round; fact nhỏ được inspect inline, còn
+`explore` child chỉ dùng cho investigation nhiều dữ liệu hoặc thực sự độc lập.
+
 Lệnh setup cần nhớ:
 
 | Lệnh | Vai trò |
@@ -159,8 +168,9 @@ Lệnh setup cần nhớ:
 
 `/mode` hoặc `Ctrl+Alt+M` mở selector năm dòng:
 
-- **Auto** (default): giữ workflow hiện tại — workspace edit và Bash thông thường chạy
-  dưới policy/sandbox; destructive, protected hoặc outside operation mới hỏi.
+- **Auto** (default): workspace edit và Bash thông thường chạy dưới policy/sandbox; known
+  commit, push, delete, publish, deploy, destructive, protected hoặc outside-write pattern sẽ
+  hỏi. Regex không exhaustive, nên model vẫn phải tuân authority rules trong `AGENTS.md`.
 - **Manual**: dedicated read/search tools chạy tự do; mỗi `edit`/`write`, mỗi Bash call và
   mỗi work-child activation đều hỏi một lần.
 - **Accept edits**: ordinary `edit`/`write` trong workspace tự chạy; Bash, protected/outside
@@ -169,7 +179,9 @@ Lệnh setup cần nhớ:
   side-effect tool. Khi thoát, chỉ ba tool mà Plan đã tắt được restore; tool thêm động không
   bị mất.
 - **Bypass permissions**: phải confirm trong attended TUI và chỉ sống trong runtime hiện tại.
-  Nó bỏ soft prompt nhưng không bỏ Seatbelt, protected/outside boundary hoặc credential deny.
+  Nó bỏ gate prompt nhưng không phải authorization để commit, push, deploy, publish hoặc xoá
+  user work; `AGENTS.md` vẫn áp dụng. Seatbelt, protected/outside boundary và credential deny
+  không bị tắt.
 
 Auto/Manual/Accept edits/Plan đi theo active session branch. Bypass reset về Auto sau
 `/reload`, resume, fork hoặc session mới. Không đổi mode khi parent đang chạy; mode change và
@@ -197,7 +209,8 @@ network vẫn unrestricted.
 `present.ts` không phải public subagent. Exact `/present on` mới cho phép gửi future eligible
 answers sang private one-shot RPC `openai-codex/gpt-5.6-sol:off`. Original answer luôn là
 nguồn authority. Rewrite chỉ để hiển thị, fail-open, không tạo durable child và usage không
-được cộng vào parent footer totals. `/reload` reset nó về off.
+được cộng vào parent footer totals. Fenced code cùng literal number, URL, path và inline code
+phải giữ exact; mutation làm rewrite bị drop. `/reload` reset nó về off.
 
 ## 6. Anthropic cache
 
@@ -222,8 +235,13 @@ Log ở `~/.pi/agent/cache/cache-keepalive.log`; tắt debug sau khi điều tra
 
 - `permission-mode` chỉ thay soft approval policy; known credential deny và canonical path
   boundary không thể bị Bypass tắt.
-- `permission-gate` là sole pre-execution owner cho model tools; Manual/Accept edits hỏi đúng
-  một lần theo matrix, Plan block phòng thủ và Bypass vẫn block protected/outside built-in writes.
+- `permission-gate` là sole pre-execution owner cho model tools; Auto hỏi common authority
+  patterns, Manual/Accept edits hỏi theo matrix, Plan block phòng thủ và Bypass vẫn block
+  protected/outside built-in writes.
+- `context-snapshots` giữ append-only history nhưng chỉ gửi newest runtime/permission snapshot
+  tới provider; runtime snapshot không lặp cwd mà Pi core đã có.
+- `repeat-reminder` gửi runtime-authored custom advisory riêng, không giả system tag trong
+  ordinary tool output.
 - `sandbox-bash` chạy Bash tuần tự qua macOS Seatbelt; Plan không có writable root, reads khác
   và network vẫn mở, không có unsandboxed retry.
 - `secret-guard` và spill redaction là best effort, không phải data-loss-proof DLP.

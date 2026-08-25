@@ -84,11 +84,12 @@ rewrite_value="$(env -u PI_ANTHROPIC_OAUTH_REWRITE_MODE "$MISE" --quiet -C / exe
 list_output="$("$MISE" --quiet -C / exec "node@$NODE_VERSION" -- pi list)"
 for spec in \
   "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2" \
-  "npm:pi-web-search@1.3.1" \
-  "npm:@upstash/context7-pi@0.1.2"
+  "npm:pi-web-search@1.3.1"
 do
   grep -Fxq "  $spec" <<<"$list_output" || fail "pi list is missing exact pinned package: $spec"
 done
+context7_spec="npm:@upstash/context7-pi@0.1.2"
+grep -Fxq "  $context7_spec (filtered)" <<<"$list_output" || fail "pi list is missing exact filtered package: $context7_spec"
 
 oauth_store="$AGENT_DIR/git/github.com/duy-tung/pi-anthropic-oauth-plus"
 [ "$(git -C "$oauth_store" rev-parse HEAD 2>/dev/null || true)" = "1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49" ] || fail "installed OAuth checkout is not the v0.3.2 commit"
@@ -126,10 +127,24 @@ rsync -a "$ROOT/extensions/" "$smoke_agent/extensions/"
 rsync -a "$ROOT/skills/" "$smoke_agent/skills/"
 rsync -a "$ROOT/prompts/" "$smoke_agent/prompts/"
 cp "$ROOT/AGENTS.md" "$smoke_agent/AGENTS.md"
+cat > "$smoke_agent/extensions/doctor-resource-audit.ts" <<'EOF'
+export default function (pi) {
+  pi.registerCommand("doctor-resource-audit", {
+    description: "Verify isolated resource filtering",
+    handler: async (_args, ctx) => {
+      const active = new Set(pi.getActiveTools());
+      const required = ["resolve-library-id", "query-docs"];
+      const missing = required.filter((name) => !active.has(name));
+      ctx.ui.notify(missing.length === 0 ? "doctor-context7-tools-active" : `doctor-context7-tools-missing:${missing.join(",")}`, missing.length === 0 ? "info" : "error");
+    },
+  });
+}
+EOF
 "$MISE" -C / exec "node@$NODE_VERSION" -- node -e '
 const fs = require("node:fs");
 const settings = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-settings.packages = process.argv.slice(3);
+const packagePaths = process.argv.slice(3);
+settings.packages = [packagePaths[0], packagePaths[1], { source: packagePaths[2], skills: [] }];
 delete settings.defaultProvider;
 delete settings.defaultModel;
 delete settings.enabledModels;
@@ -145,6 +160,22 @@ if [ -s "$stderr_file" ]; then
   fail "isolated offline Pi startup emitted extension diagnostics"
 fi
 grep -Fq "provider" "$stdout_file" || fail "isolated offline model listing returned no model table"
+
+commands_stdout="$smoke_root/commands-stdout"
+commands_stderr="$smoke_root/commands-stderr"
+printf '%s\n' \
+  '{"id":"commands","type":"get_commands"}' \
+  '{"id":"resources","type":"prompt","message":"/doctor-resource-audit"}' \
+  | "$MISE" --quiet -C / exec "node@$NODE_VERSION" -- env HOME="$smoke_home" PI_CODING_AGENT_DIR="$smoke_agent" PI_OFFLINE=1 pi --mode rpc --no-session --no-approve >"$commands_stdout" 2>"$commands_stderr" || {
+    cat "$commands_stderr" >&2
+    fail "isolated offline command inventory failed"
+  }
+[ ! -s "$commands_stderr" ] || { cat "$commands_stderr" >&2; fail "isolated command inventory emitted extension diagnostics"; }
+grep -Fq '"name":"c7-docs"' "$commands_stdout" || fail "Context7 explicit prompt is missing"
+if grep -Fq '"name":"skill:context7-docs"' "$commands_stdout"; then
+  fail "Context7 package skill should be filtered out of recurring model context"
+fi
+grep -Fq '"message":"doctor-context7-tools-active"' "$commands_stdout" || fail "Context7 tools are not active after package skill filtering"
 
 if ! command -v nvim >/dev/null 2>&1; then
   printf '%s\n' "doctor: warning: nvim is configured as externalEditor but is not installed" >&2

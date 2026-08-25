@@ -88,6 +88,7 @@ test("config-only install backs up managed config and preserves all runtime stat
     const first = runInstall(f.home);
     assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
     assertManagedMatches(f.agent);
+    assert.equal(existsSync(join(f.agent, "AGENTS.override.md")), false, "repo-only override must not be installed globally");
     for (const [rel, content] of sentinels) assert.equal(readFileSync(join(f.agent, rel), "utf8"), content);
 
     const backupRoot = join(f.home, ".local", "state", "pi-setup", "backups");
