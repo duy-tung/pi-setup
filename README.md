@@ -198,9 +198,10 @@ conversation-tree navigation are refused while a work child is starting/running.
 `subagent.ts` uses Pi's native RPC protocol. A child process exists only for one active
 turn; its durable session remains under
 `~/.pi/agent/subagents/<parent-session-id>/<child-id>/` for `send_message` follow-ups.
-Background completion is delivered automatically, while `/agents` exposes the private
-transcript and human steering. Child IDs are authorized to their exact parent session;
-per-child control is serialized across settlement/cold-resume boundaries, and there is no
+Background completion is delivered automatically. The TUI status widget shows only active
+turns and clears when the last child settles, while `/agents` and `list_agents` retain durable
+children for transcript inspection and follow-ups. Child IDs are authorized to their exact
+parent session; per-child control is serialized across settlement/cold-resume boundaries, and there is no
 cwd override, orphan adoption, nesting, or polling tool.
 
 Every child uses `--no-approve`, so project-controlled extensions and context cannot shadow

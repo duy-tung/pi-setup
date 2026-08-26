@@ -283,20 +283,16 @@ export default function (pi: ExtensionAPI) {
   function syncWidget(ctx = uiCtx): void {
     if (!ctx || ctx.mode !== "tui") return;
     const rows = [...records.values()]
-      .sort((a, b) => {
-        const activeA = a.status === "running" ? 0 : 1;
-        const activeB = b.status === "running" ? 0 : 1;
-        return activeA - activeB || b.updatedAt - a.updatedAt;
-      })
+      .filter((record) => record.status === "running")
+      .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 7)
       .map((record) => {
         const live = active.get(record.id);
-        const mark = record.status === "running" ? "◐" : record.status === "ready" ? "○" : record.status === "failed" ? "!" : "×";
         const stats = live
           ? `${fmtAge(Date.now() - record.updatedAt)} ↓${fmtTokens(live.usage.tokens)} $${live.usage.cost.toFixed(3)}`
           : record.status;
         const activity = live?.latestActivity ? ` · ${oneLine(live.latestActivity, 60)}` : "";
-        return `${mark} ${record.profile.padEnd(7)} ${oneLine(record.label, 42)} · ${stats}${activity}`;
+        return `◐ ${record.profile.padEnd(7)} ${oneLine(record.label, 42)} · ${stats}${activity}`;
       });
     try {
       if (rows.length === 0) ctx.ui.setWidget("subagents", undefined);

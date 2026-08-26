@@ -199,10 +199,12 @@ Public API giữ cố định:
 - tools: `subagent`, `send_message`, `list_agents`, `interrupt_agent`;
 - profiles: `explore`, `web`, `work`.
 
-Subagents dùng native Pi RPC. Child process chỉ sống trong một active turn; durable child
-session nằm dưới `~/.pi/agent/subagents/` và không được backup vào repo. Manual/Accept edits
-coi mỗi new/resumed `work` activation là một broad approval scope vì unattended child không
-forward được từng popup; Plan chặn work activation. Parent permission mode không truyền vào
+Subagents dùng native Pi RPC. Child process chỉ sống trong một active turn; widget trạng thái
+chỉ hiện các turn đang chạy và tự clear khi child cuối cùng settle. Durable child session vẫn
+nằm dưới `~/.pi/agent/subagents/`, còn xem/resume được qua `/agents` hoặc `list_agents`, và
+không được backup vào repo. Manual/Accept edits coi mỗi new/resumed `work` activation là một
+broad approval scope vì unattended child không forward được từng popup; Plan chặn work
+activation. Parent permission mode không truyền vào
 child. Đây là tool/profile restriction để giảm tai nạn, không phải process isolation; Bash
 network vẫn unrestricted.
 

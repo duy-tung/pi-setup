@@ -54,6 +54,7 @@ function harness() {
   const tools = new Map();
   const entries = [];
   const notices = [];
+  const widgets = [];
   const pi = {
     on(name, handler) {
       const list = handlers.get(name) ?? [];
@@ -87,7 +88,9 @@ function harness() {
       getEntries: () => entries,
     },
     ui: {
-      setWidget() {},
+      setWidget(name, content) {
+        widgets.push({ name, content });
+      },
       notify(message, type = "info") {
         notices.push({ message, type });
       },
@@ -100,7 +103,7 @@ function harness() {
     return result;
   }
 
-  return { ctx, emit, entries, notices, tools };
+  return { ctx, emit, entries, notices, tools, widgets };
 }
 
 test("real work-child startup, interrupt, abort, and shutdown own the mode lock", async () => {
@@ -155,6 +158,22 @@ test("real work-child startup, interrupt, abort, and shutdown own the mode lock"
     ));
     assert.equal(hasRunningWorkSubagent(), false, "interrupt releases only after finalization");
 
+    process.env.FAKE_RPC_MODE = "normal";
+    const completed = await within(workTool.execute(
+      "completed-child",
+      { description: "completed child", prompt: "finish", profile: "explore", run_in_background: false },
+      undefined,
+      undefined,
+      h.ctx,
+    ));
+    assert.equal(completed.details.status, "ready");
+    assert.deepEqual(
+      h.widgets.at(-1),
+      { name: "subagents", content: undefined },
+      "settled children must clear from the status widget while remaining resumable",
+    );
+
+    process.env.FAKE_RPC_MODE = "delayed";
     const shutdownChild = await within(workTool.execute(
       "shutdown-child",
       { description: "shutdown child", prompt: "wait", profile: "work", run_in_background: true },
