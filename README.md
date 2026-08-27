@@ -1,8 +1,10 @@
 # Portable Pi setup for macOS
 
 Personal configuration and bootstrap for the [Pi coding agent](https://github.com/badlogic/pi-mono).
-This private repository is the source of truth for six managed resources under
+This public repository is the source of truth for six managed resources under
 `~/.pi/agent/`; credentials, runtime state, caches, and session logs stay local.
+No root license is granted: public visibility alone does not authorize reuse, and bundled
+components retain their own license notices.
 
 ## Current snapshot
 
@@ -21,17 +23,18 @@ Current inventory: **18 extensions**, **6 skills**, and **5 prompt templates**.
 
 Prerequisites are Apple Command Line Tools and Homebrew; install them first if
 `xcode-select -p` or `brew --version` fails (use the official instructions at
-[brew.sh](https://brew.sh/)). The repository is private:
+[brew.sh](https://brew.sh/)). The repository is public, so cloning it needs no GitHub login:
 
 ```bash
 brew install gh mise neovim
 echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 exec zsh
-gh auth login
-gh repo clone duy-tung/pi-setup ~/repos/pi-setup
+git clone https://github.com/duy-tung/pi-setup.git ~/repos/pi-setup
 cd ~/repos/pi-setup
 ./install.sh
 ```
+
+Run `gh auth login` before authenticated GitHub operations such as creating repositories or pushing.
 
 `install.sh` pins Node/Pi, three top-level package versions, long cache retention,
 and technical-safe OAuth prompt rewriting; it then applies only the managed config and
@@ -287,6 +290,9 @@ were not needed.
 
 These are convenience entry points. Skills can still activate from natural-language
 requests.
+
+For a stack-neutral project bootstrap workflow with a concrete Go service baseline, see the
+[detailed Vietnamese new-project guideline](docs/new-project-setup-tieng-viet.md).
 
 ## Typical workflow
 

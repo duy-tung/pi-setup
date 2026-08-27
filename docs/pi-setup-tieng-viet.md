@@ -1,11 +1,17 @@
 # Pi setup — runbook vận hành và khôi phục
 
-> **Nguồn sự thật:** private repo `duy-tung/pi-setup`.
+> **Nguồn sự thật:** public repo `duy-tung/pi-setup`.
+>
+> **License:** chưa cấp root license; public visibility không tự cấp quyền reuse. Bundled component
+> giữ license notice riêng.
 >
 > **Nền tảng được hỗ trợ:** macOS.
 >
 > **Mục tiêu bảo mật:** giảm tai nạn trong workflow local có người giám sát; không chống
 > hostile code hoặc prompt injection.
+
+Tài liệu này vận hành Pi trên máy. Khi tạo repository phần mềm mới, dùng thêm
+[guideline setup dự án mới](./new-project-setup-tieng-viet.md).
 
 ## 1. Cài trên máy Mac mới
 
@@ -16,11 +22,13 @@ Prerequisite: Apple Command Line Tools và Homebrew đã cài (`xcode-select -p`
 brew install gh mise neovim
 echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 exec zsh
-gh auth login
-gh repo clone duy-tung/pi-setup ~/repos/pi-setup
+git clone https://github.com/duy-tung/pi-setup.git ~/repos/pi-setup
 cd ~/repos/pi-setup
 ./install.sh
 ```
+
+Public clone không cần GitHub login. Chạy `gh auth login` trước thao tác authenticated như tạo repo
+hoặc push.
 
 Installer sẽ:
 
