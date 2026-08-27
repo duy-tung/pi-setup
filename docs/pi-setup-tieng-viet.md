@@ -55,9 +55,23 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 | Node | `24.15.0` qua mise |
 | Pi | `@earendil-works/pi-coding-agent@0.84.3` |
 | Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2` |
-| Web search | `npm:pi-web-search@1.3.1` |
+| Web search | `npm:pi-web-search@1.3.1` + `patches/pi-web-search-oauth-system.patch` |
 | Context7 | `npm:@upstash/context7-pi@0.1.2`; giữ tools và `/c7-docs`, filter package skill trùng lặp |
 | tree-rewind | bundled package `extensions/tree-rewind/`, provenance `65fa4fa` |
+
+### Patch cho package đã publish
+
+Package publish nào cần sửa source tại chỗ thì để unified diff trong `patches/`.
+`install.sh` apply sau bước reconcile package, `doctor.sh` verify checksum post-image của
+file đã patch — cài lại, bump version hay sửa tay làm mất patch đều fail rõ ràng thay vì
+âm thầm regress.
+
+Hiện chỉ có `patches/pi-web-search-oauth-system.patch`. `pi-web-search` gọi thẳng
+`/v1/messages` cho `web_search` native của Anthropic nhưng không gửi field `system`. Token
+OAuth Claude Pro/Max chỉ được chấp nhận khi system block đầu tiên là identity Claude Code;
+thiếu nó Anthropic trả `429 rate_limit_error` với message `"Error"` chung chung và không có
+header `anthropic-ratelimit-*` — nhìn y hệt hết quota nhưng thực chất là bị từ chối. Patch
+chỉ thêm block đó cho credential OAuth, request bằng API key giữ nguyên. Chưa báo upstream.
 
 `settings.json` gọi npm qua:
 
@@ -371,6 +385,12 @@ exec zsh
 
 `pi list` phải hiện đúng ba exact specs và chỉ một Anthropic OAuth provider package. Không
 thêm upstream OAuth package song song với fork vì cả hai register provider `anthropic`.
+
+### Web search trả 429
+
+`429 rate_limit_error` với message `"Error"` mà `anthropic-ratelimit-*` vắng mặt nghĩa là
+patch OAuth của `pi-web-search` không còn áp dụng, không phải hết quota. Chạy `./doctor.sh`
+để xác nhận checksum, rồi `./install.sh` để apply lại.
 
 ### Extension chưa xuất hiện
 

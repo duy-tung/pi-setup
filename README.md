@@ -116,7 +116,7 @@ after its authority and trust-boundary findings were fixed.
 | Package | Purpose |
 |---|---|
 | `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3 request hooks, and server-side fallback pricing |
-| `pi-web-search@1.3.1` | Web search tools |
+| `pi-web-search@1.3.1` (patched) | Web search tools; carries `patches/pi-web-search-oauth-system.patch` |
 | `@upstash/context7-pi@0.1.2` | Context7 tools and explicit `/c7-docs`; its redundant package skill is filtered out |
 
 These are exact top-level pins, not a hermetic supply-chain lock: Pi's published npm
@@ -125,6 +125,22 @@ checks configured specs, installed top-level versions, OAuth commit/dirty state,
 isolated load health; it does not hash every installed npm implementation byte. OAuth
 v0.3.2 honors Pi's request-body/tool-choice hooks, preserves required betas while rejecting
 fine-grained tool streaming, and records the returned fallback model with its own pricing.
+
+### Patched packages
+
+A published package that needs a local source fix carries a unified diff under
+`patches/`. `install.sh` applies each one after package reconciliation and `doctor.sh`
+verifies the pinned post-image checksum of the patched file, so a reinstall, a version
+bump, or a hand edit that drops the fix fails loudly instead of silently regressing.
+
+`patches/pi-web-search-oauth-system.patch` is the only current entry.
+`pi-web-search` bypasses the provider and calls `/v1/messages` directly for the
+Anthropic-native `web_search` tool, but sends no `system` field. A Claude Pro/Max OAuth
+token is only accepted when the first system block is the Claude Code identity, so
+without it Anthropic answers `429 rate_limit_error` with a generic `"Error"` message and
+no `anthropic-ratelimit-*` headers - a policy rejection that reads like an exhausted
+quota. The patch adds that block for OAuth credentials only; API-key requests are
+unchanged. Upstream has not been notified yet.
 
 ### Anthropic prompt-cache policy
 

@@ -5,6 +5,9 @@ set -euo pipefail
 NODE_VERSION="24.15.0"
 PI_VERSION="0.84.3"
 OAUTH_REWRITE_MODE="technical-safe"
+WEB_SEARCH_PATCH="pi-web-search-oauth-system.patch"
+WEB_SEARCH_PATCH_TARGET="src/api.ts"
+WEB_SEARCH_PATCHED_SHA256="f95b42a015a6b04cdc9bfb5a06f8cf4d1554e9482312180c783f0fa7241cf102"
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
 HOME_REAL="$(CDPATH= cd -- "$HOME" && pwd -P)"
@@ -33,6 +36,8 @@ fail() {
 [ ! -L "$PI_ROOT" ] || fail "$PI_ROOT must be a real directory, not a symlink"
 [ ! -L "$AGENT_DIR" ] || fail "$AGENT_DIR must be a real directory, not a symlink"
 command -v rsync >/dev/null 2>&1 || fail "rsync is not available"
+command -v patch >/dev/null 2>&1 || fail "patch is not available"
+command -v shasum >/dev/null 2>&1 || fail "shasum is not available"
 MISE=""
 if [ "$MODE" = "full" ]; then
   MISE="$(command -v mise 2>/dev/null || true)"
@@ -108,6 +113,15 @@ for (const p of process.argv.slice(1)) process.stdout.write(`${JSON.parse(fs.rea
 ' "$web_meta" "$context_meta")" || fail "unable to read installed npm package metadata"
 [ "$installed_versions" = "1.3.1
 0.1.2" ] || fail "installed npm package versions do not match settings pins"
+
+# Upstream pi-web-search omits the system field on its direct Anthropic call, and
+# a Claude Pro/Max OAuth token answers that with a generic 429 rate_limit_error.
+# The pinned post-image checksum proves patches/ is applied to the live source.
+[ -f "$ROOT/patches/$WEB_SEARCH_PATCH" ] || fail "missing package patch: patches/$WEB_SEARCH_PATCH"
+web_search_target="$(dirname "$web_meta")/$WEB_SEARCH_PATCH_TARGET"
+[ -f "$web_search_target" ] || fail "patched pi-web-search source is missing: $WEB_SEARCH_PATCH_TARGET"
+[ "$(shasum -a 256 "$web_search_target" | awk '{ print $1 }')" = "$WEB_SEARCH_PATCHED_SHA256" ] \
+  || fail "installed pi-web-search does not carry the pinned OAuth system-prompt patch; rerun ./install.sh"
 
 printf '%s\n' "==> Running Pi setup tests"
 "$MISE" -C / exec "node@$NODE_VERSION" -- node --experimental-strip-types --test "$ROOT"/tests/*.test.mjs

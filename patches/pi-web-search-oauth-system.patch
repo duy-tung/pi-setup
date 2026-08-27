@@ -1,0 +1,19 @@
+--- a/src/api.ts
++++ b/src/api.ts
+@@ -845,9 +845,16 @@
+     }
+ 
+     const maxTokens = Math.min(Math.max(1024, Math.floor(model.maxTokens / 3) || 4096), 8192);
++    // Claude Pro/Max OAuth tokens are only accepted when the first system block is
++    // the Claude Code identity. Without it api.anthropic.com answers 429
++    // rate_limit_error (generic "Error", no anthropic-ratelimit-* headers) even
++    // when the subscription is nowhere near its limit.
+     const requestBody = {
+         model: model.id,
+         max_tokens: maxTokens,
++        ...(isOAuth
++            ? { system: [{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." }] }
++            : {}),
+         messages: [{ role: "user", content: prompt }],
+         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }],
+         stream: true,

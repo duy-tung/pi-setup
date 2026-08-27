@@ -8,6 +8,9 @@ PI_PACKAGE="@earendil-works/pi-coding-agent"
 PI_VERSION="0.84.3"
 OAUTH_COMMIT="1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49"
 OAUTH_REWRITE_MODE="technical-safe"
+WEB_SEARCH_PATCH="pi-web-search-oauth-system.patch"
+WEB_SEARCH_PATCH_TARGET="src/api.ts"
+WEB_SEARCH_PATCHED_SHA256="f95b42a015a6b04cdc9bfb5a06f8cf4d1554e9482312180c783f0fa7241cf102"
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
@@ -57,6 +60,8 @@ esac
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v rsync >/dev/null 2>&1 || die "rsync is required"
 command -v diff >/dev/null 2>&1 || die "diff is required"
+command -v patch >/dev/null 2>&1 || die "patch is required"
+command -v shasum >/dev/null 2>&1 || die "shasum is required"
 # shellcheck source=scripts/operation-lock.sh
 . "$ROOT/scripts/operation-lock.sh"
 acquire_operation_lock "$STATE_DIR" || exit 1
@@ -290,6 +295,32 @@ prepare_package_transaction() {
   fi
 }
 
+file_sha256() {
+  shasum -a 256 "$1" | awk '{ print $1 }'
+}
+
+# Published packages that need a local source fix carry a patch under patches/.
+# The pinned post-image checksum is the applied marker, so reruns are no-ops and
+# a partially applied or upstream-changed tree fails loudly instead of silently.
+# `patch` runs with --batch --forward so it never prompts and never silently
+# reverses an already-applied hunk; it refuses instead, which the checksum
+# short-circuit above has already handled.
+apply_package_patch() {
+  patch_name="$1"
+  target_dir="$2"
+  target_rel="$3"
+  expected_sha="$4"
+  patch_file="$ROOT/patches/$patch_name"
+  [ -f "$patch_file" ] || die "missing package patch: patches/$patch_name"
+  [ -f "$target_dir/$target_rel" ] || die "package patch target is missing: $target_dir/$target_rel"
+  if [ "$(file_sha256 "$target_dir/$target_rel")" = "$expected_sha" ]; then return 0; fi
+  patch -p1 -s --batch --forward --dry-run -d "$target_dir" < "$patch_file" >/dev/null 2>&1 \
+    || die "package patch no longer applies to the installed source: patches/$patch_name"
+  patch -p1 -s --batch --forward -d "$target_dir" < "$patch_file" || die "unable to apply package patch: patches/$patch_name"
+  [ "$(file_sha256 "$target_dir/$target_rel")" = "$expected_sha" ] \
+    || die "patched source does not match its pinned checksum: patches/$patch_name"
+}
+
 finish() {
   code=$?
   trap - EXIT INT TERM HUP
@@ -378,6 +409,9 @@ if [ "$MODE" = "full" ]; then
       "$MISE" -C / exec "node@$NODE_VERSION" -- pi install "$spec" --no-approve
     done
   fi
+  printf '%s\n' "==> Applying pinned package patches"
+  apply_package_patch "$WEB_SEARCH_PATCH" "$AGENT_DIR/npm/node_modules/pi-web-search" \
+    "$WEB_SEARCH_PATCH_TARGET" "$WEB_SEARCH_PATCHED_SHA256"
   "$ROOT/doctor.sh"
 else
   "$ROOT/doctor.sh" --config-only
