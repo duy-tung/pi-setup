@@ -16,17 +16,29 @@
  *     its label (a convention taught in the schema, not a boolean);
  *   - single-select: a typed answer OVERRIDES the options (selected stays []);
  *     multi-select: a typed answer is ADDED alongside the toggled options;
- *   - skip/cancel yields selected: [] with no custom — an explicit non-answer.
+ *   - skip/cancel yields selected: [] with no custom — an explicit non-answer;
+ *   - long questions open at their tail while choices/input stay visible, with
+ *     PageUp/PageDown available to inspect earlier question text.
  *
- * Multi-select is emulated with a toggle loop over ctx.ui.select because pi's
- * ExtensionUIContext has no native multi-select dialog.
+ * Multi-select is emulated with a toggle loop over the scrollable selector because
+ * Pi's ExtensionUIContext has no native multi-select dialog.
  *
  * Non-interactive runs (print mode, subagents) have no dialog UI; the tool
  * errors with instructions to proceed with the recommended option or surface
  * the question in the report.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import {
+	Input,
+	Key,
+	matchesKey,
+	Text,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 /** Delegated RPC subagents have no human dialog channel — fail closed. */
@@ -41,6 +53,264 @@ interface Answer {
 	id: string;
 	selected: string[];
 	custom?: string;
+}
+
+interface DialogOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+const DEFAULT_TERMINAL_ROWS = 24;
+const MAX_DIALOG_ROWS = 30;
+const MIN_DIALOG_ROWS = 1;
+
+class QuestionViewport {
+	private scrollBack = 0;
+	private pageSize = 1;
+	private totalLines = 1;
+	private firstVisible = 0;
+	private lastVisible = 0;
+	private text: Text;
+
+	constructor(text: Text) {
+		this.text = text;
+	}
+
+	setText(text: Text): void {
+		this.text = text;
+		this.scrollBack = 0;
+	}
+
+	render(width: number, rowBudget: number): string[] {
+		const rendered = this.text.render(width);
+		const lines = rendered.length > 0 ? rendered : [""];
+		this.totalLines = lines.length;
+		this.pageSize = Math.max(1, Math.min(lines.length, Math.floor(rowBudget)));
+		const maxScrollBack = Math.max(0, lines.length - this.pageSize);
+		this.scrollBack = Math.max(0, Math.min(maxScrollBack, this.scrollBack));
+		const start = Math.max(0, lines.length - this.pageSize - this.scrollBack);
+		this.firstVisible = start;
+		this.lastVisible = Math.min(lines.length - 1, start + this.pageSize - 1);
+		return lines.slice(start, start + this.pageSize);
+	}
+
+	handleInput(data: string): boolean {
+		const step = Math.max(1, this.pageSize - 1);
+		if (matchesKey(data, Key.pageUp)) {
+			this.scrollBack += step;
+			return true;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scrollBack = Math.max(0, this.scrollBack - step);
+			return true;
+		}
+		return false;
+	}
+
+	status(): string {
+		if (this.totalLines <= this.pageSize) return "Prompt fully visible";
+		return `Prompt ${this.firstVisible + 1}–${this.lastVisible + 1}/${this.totalLines} · PgUp/PgDn scroll`;
+	}
+}
+
+function dialogRowBudget(): number {
+	const detected = process.stdout.rows;
+	const terminalRows = typeof detected === "number" && Number.isFinite(detected) && detected > 0
+		? Math.floor(detected)
+		: DEFAULT_TERMINAL_ROWS;
+	return Math.max(MIN_DIALOG_ROWS, Math.min(MAX_DIALOG_ROWS, terminalRows));
+}
+
+function compactTitle(raw: string): string {
+	const title = raw.replace(/\s+/g, " ").trim() || "Question";
+	return title.length > 80 ? `${title.slice(0, 79)}…` : title;
+}
+
+function fixedLine(text: string, width: number): string {
+	return truncateToWidth(` ${text}`, Math.max(1, width));
+}
+
+async function selectQuestion(
+	ctx: ExtensionContext,
+	title: string,
+	question: string,
+	options: DialogOption[],
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const display = (option: DialogOption) => `${option.label}${option.description ? ` — ${option.description}` : ""}`;
+	if (ctx.mode !== "tui") {
+		const rows = options.map(display);
+		const selected = await ctx.ui.select(`${title}\n${question}`, rows, { signal });
+		return options.find((option) => display(option) === selected)?.value;
+	}
+	if (signal?.aborted) return undefined;
+
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+		let selectedIndex = 0;
+		const selected = () => options[selectedIndex] ?? null;
+		const promptText = (option: DialogOption | null) => option
+			? [
+				"Selected choice:",
+				option.label,
+				option.description ?? "(no additional description)",
+				"",
+				"Question:",
+				question,
+			].join("\n")
+			: question;
+		const viewport = new QuestionViewport(new Text(theme.fg("text", promptText(selected())), 1, 0));
+		const selectIndex = (index: number) => {
+			selectedIndex = (index + options.length) % options.length;
+			viewport.setText(new Text(theme.fg("text", promptText(selected())), 1, 0));
+		};
+		const renderOptions = (width: number, rowBudget: number): string[] => {
+			const budget = Math.max(1, Math.floor(rowBudget));
+			const needsIndicator = options.length > budget && budget > 1;
+			const visibleCount = needsIndicator ? budget - 1 : Math.min(options.length, budget);
+			const start = Math.max(0, Math.min(
+				selectedIndex - Math.floor(visibleCount / 2),
+				options.length - visibleCount,
+			));
+			const lines = options.slice(start, start + visibleCount).map((option, offset) => {
+				const index = start + offset;
+				const marker = option.description ? " ⓘ" : "";
+				const text = `${index === selectedIndex ? "→" : " "} ${option.label}${marker}`;
+				return truncateToWidth(theme.fg(index === selectedIndex ? "accent" : "text", text), width);
+			});
+			if (needsIndicator) {
+				lines.push(fixedLine(theme.fg("dim", `choice ${selectedIndex + 1}/${options.length}`), width));
+			}
+			return lines;
+		};
+		const onAbort = () => done(undefined);
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		return {
+			render(width: number) {
+				const rowBudget = dialogRowBudget();
+				const optionBudget = Math.max(1, Math.min(options.length, rowBudget - 1));
+				const optionLines = renderOptions(width, optionBudget);
+				let spareRows = Math.max(0, rowBudget - optionLines.length - 1);
+				const showTitle = spareRows > 0;
+				if (showTitle) spareRows--;
+				const showAction = spareRows > 0;
+				if (showAction) spareRows--;
+				const showStatus = spareRows > 0;
+				if (showStatus) spareRows--;
+				const questionBudget = Math.max(0, rowBudget
+					- optionLines.length
+					- (showTitle ? 1 : 0)
+					- (showAction ? 1 : 0)
+					- (showStatus ? 1 : 0));
+				const questionLines = questionBudget > 0 ? viewport.render(width, questionBudget) : [];
+				return [
+					...(showTitle ? [fixedLine(theme.fg("accent", theme.bold(title)), width)] : []),
+					...questionLines,
+					...(showStatus ? [fixedLine(theme.fg("dim", viewport.status()), width)] : []),
+					...optionLines,
+					...(showAction
+						? [fixedLine(theme.fg("dim", "↑↓ choices · enter select · esc skip · PgUp/PgDn prompt"), width)]
+						: []),
+				].slice(0, rowBudget);
+			},
+			invalidate() {},
+			dispose() {
+				signal?.removeEventListener("abort", onAbort);
+			},
+			handleInput(data: string) {
+				if (viewport.handleInput(data)) {
+					tui.requestRender();
+					return;
+				}
+				if (keybindings.matches(data, "tui.select.up") || data === "k") {
+					selectIndex(selectedIndex - 1);
+				} else if (keybindings.matches(data, "tui.select.down") || data === "j") {
+					selectIndex(selectedIndex + 1);
+				} else if (keybindings.matches(data, "tui.select.confirm") || data === "\n") {
+					const option = selected();
+					if (option) done(option.value);
+				} else if (keybindings.matches(data, "tui.select.cancel")) {
+					done(undefined);
+				}
+				tui.requestRender();
+			},
+		};
+	}, {
+		overlay: true,
+		overlayOptions: { width: "90%", anchor: "center", margin: 0 },
+	});
+}
+
+async function inputQuestion(
+	ctx: ExtensionContext,
+	title: string,
+	question: string,
+	placeholder: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	if (ctx.mode !== "tui") {
+		return ctx.ui.input(`${title}\n${question}`, placeholder, { signal });
+	}
+	if (signal?.aborted) return undefined;
+
+	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+		const input = new Input();
+		input.focused = true;
+		input.onSubmit = (value: string) => done(value);
+		input.onEscape = () => done(undefined);
+		const viewport = new QuestionViewport(new Text(theme.fg("text", question), 1, 0));
+		const onAbort = () => done(undefined);
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		return {
+			render(width: number) {
+				const rowBudget = dialogRowBudget();
+				const inputLines = input.render(width);
+				const hasQuestion = rowBudget > inputLines.length;
+				let spareRows = Math.max(0, rowBudget - inputLines.length - (hasQuestion ? 1 : 0));
+				const showTitle = spareRows > 0;
+				if (showTitle) spareRows--;
+				const showAction = spareRows > 0;
+				if (showAction) spareRows--;
+				const showStatus = spareRows > 0;
+				if (showStatus) spareRows--;
+				const showLabel = spareRows > 0;
+				if (showLabel) spareRows--;
+				const questionBudget = hasQuestion
+					? Math.max(1, rowBudget
+						- inputLines.length
+						- (showTitle ? 1 : 0)
+						- (showAction ? 1 : 0)
+						- (showStatus ? 1 : 0)
+						- (showLabel ? 1 : 0))
+					: 0;
+				const questionLines = questionBudget > 0 ? viewport.render(width, questionBudget) : [];
+				return [
+					...(showTitle ? [fixedLine(theme.fg("accent", theme.bold(title)), width)] : []),
+					...questionLines,
+					...(showStatus ? [fixedLine(theme.fg("dim", viewport.status()), width)] : []),
+					...(showLabel ? [fixedLine(theme.fg("muted", `Answer · ${placeholder}`), width)] : []),
+					...inputLines,
+					...(showAction
+						? [fixedLine(theme.fg("dim", "enter submit · esc skip · PgUp/PgDn prompt"), width)]
+						: []),
+				].slice(0, rowBudget);
+			},
+			invalidate: () => input.invalidate(),
+			dispose() {
+				input.focused = false;
+				signal?.removeEventListener("abort", onAbort);
+			},
+			handleInput(data: string) {
+				if (!viewport.handleInput(data)) input.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	}, {
+		overlay: true,
+		overlayOptions: { width: "90%", anchor: "center", margin: 0 },
+	});
 }
 
 export default function (pi: ExtensionAPI) {
@@ -116,7 +386,7 @@ export default function (pi: ExtensionAPI) {
 				if (signal?.aborted) break;
 
 				const n = params.questions.length > 1 ? ` (${i + 1}/${params.questions.length})` : "";
-				const title = `${q.header ? `[${q.header}] ` : ""}${q.question}${n}`;
+				const title = compactTitle(`${q.header?.trim() || "Question"}${n}`);
 				const answer: Answer = { id: q.id, selected: [] };
 				const labels = (q.options ?? []).map((o) => o.label);
 				const row = (label: string, marked?: boolean) => {
@@ -124,19 +394,29 @@ export default function (pi: ExtensionAPI) {
 					const mark = marked === undefined ? "" : marked ? "[x] " : "[ ] ";
 					return `${mark}${label}${desc ? ` — ${desc}` : ""}`;
 				};
+				const dialogOption = (label: string, marked?: boolean): DialogOption => {
+					const description = q.options?.find((o) => o.label === label)?.description;
+					const mark = marked === undefined ? "" : marked ? "[x] " : "[ ] ";
+					return {
+						value: row(label, marked),
+						label: `${mark}${label}`,
+						...(description ? { description } : {}),
+					};
+				};
+				const actionOption = (value: string): DialogOption => ({ value, label: value });
 
 				if (labels.length === 0) {
 					// Free-text question: no options were provided.
-					const typed = await ctx.ui.input(title, "your answer");
+					const typed = await inputQuestion(ctx, title, q.question, "your answer", signal);
 					if (typed?.trim()) answer.custom = typed.trim();
 				} else if (q.multi_select) {
 					// Toggle loop: select flips one entry per round until Done/Skip.
 					const picked = new Set<string>();
 					for (;;) {
 						if (signal?.aborted) break;
-						const rows = labels.map((l) => row(l, picked.has(l)));
-						rows.push(ADD_TEXT, DONE, SKIP);
-						const choice = await ctx.ui.select(title, rows);
+						const rows = labels.map((l) => dialogOption(l, picked.has(l)));
+						rows.push(actionOption(ADD_TEXT), actionOption(DONE), actionOption(SKIP));
+						const choice = await selectQuestion(ctx, title, q.question, rows, signal);
 						if (choice === undefined || choice === SKIP) {
 							picked.clear();
 							delete answer.custom;
@@ -144,7 +424,7 @@ export default function (pi: ExtensionAPI) {
 						}
 						if (choice === DONE) break;
 						if (choice === ADD_TEXT) {
-							const typed = await ctx.ui.input(q.question, "additional answer");
+							const typed = await inputQuestion(ctx, title, q.question, "additional answer", signal);
 							if (typed?.trim()) answer.custom = typed.trim();
 							continue;
 						}
@@ -153,12 +433,12 @@ export default function (pi: ExtensionAPI) {
 					}
 					answer.selected = labels.filter((l) => picked.has(l));
 				} else {
-					const rows = labels.map((l) => row(l));
-					rows.push(FREE_TEXT, SKIP);
-					const choice = await ctx.ui.select(title, rows);
+					const rows = labels.map((l) => dialogOption(l));
+					rows.push(actionOption(FREE_TEXT), actionOption(SKIP));
+					const choice = await selectQuestion(ctx, title, q.question, rows, signal);
 					if (choice === FREE_TEXT) {
 						// A typed answer overrides the options for single-select.
-						const typed = await ctx.ui.input(q.question, "your answer");
+						const typed = await inputQuestion(ctx, title, q.question, "your answer", signal);
 						if (typed?.trim()) answer.custom = typed.trim();
 					} else if (choice !== undefined && choice !== SKIP) {
 						const label = labels.find((l) => row(l) === choice);

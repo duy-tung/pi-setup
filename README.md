@@ -192,7 +192,7 @@ conversation-tree navigation are refused while a work child is starting/running.
 
 | Extension | Behavior | User surface |
 |---|---|---|
-| `ask-user.ts` | Structured multiple-choice/input questions for the human | model tool `ask_user` |
+| `ask-user.ts` | Structured multiple-choice/input questions with a bounded, PageUp/PageDown-scrollable long-question viewport | model tool `ask_user` |
 | `todos.ts` | Model-managed task checklist with a TUI widget | tool `todowrite`, `/todos` |
 | `goal.ts` | Event-sourced long-running goals with autonomous continuation rounds | tools `create_goal`, `get_goal`, `update_goal`; `/goal` |
 | `subagent.ts` | Resumable Pi RPC children with parent-scoped state and explore, web, and work profiles | tools `subagent`, `send_message`, `list_agents`, `interrupt_agent`; `/agents` |
