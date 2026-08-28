@@ -140,8 +140,8 @@ test("long choice question starts at its tail and keeps choices visible while pa
     );
 
     assert.deepEqual(result.details.answers, [{ id: "choice", selected: ["Option A"] }]);
-    assert.equal(h.dialogOptions[0].overlay, true);
-    assert.equal(h.dialogOptions[0].overlayOptions.maxHeight, undefined);
+    // Inline like every other dialog here: an overlay paints over the transcript.
+    assert.equal(h.dialogOptions[0], undefined);
   });
 });
 
@@ -206,7 +206,70 @@ test("tiny terminal keeps the question tail and choices operable", async () => {
     );
 
     assert.deepEqual(result.details.answers, [{ id: "tiny", selected: ["Option A"] }]);
-    assert.equal(h.dialogOptions[0].overlayOptions.maxHeight, undefined);
+    assert.equal(h.dialogOptions[0], undefined);
+  });
+});
+
+test("a tall terminal frames the dialog out of its spare rows", async () => {
+  await withTerminalRows(48, async () => {
+    const h = harness([
+      (component) => {
+        const lines = component.render(60);
+        assert.equal(lines.length, 32, `frame must cost spare rows only: ${lines.length}`);
+        assert.ok(lines.length <= 48);
+        assert.match(lines[0], /─/);
+        assert.match(lines.at(-1), /─/);
+        assert.match(lines.join("\n"), /FINAL QUESTION\?/);
+        assert.match(lines.join("\n"), /Option A/);
+        component.handleInput("\r");
+      },
+    ]);
+
+    const result = await h.tool.execute(
+      "ask-framed",
+      {
+        questions: [{
+          id: "framed",
+          question: longQuestion(),
+          options: [{ label: "Option A" }, { label: "Option B" }],
+        }],
+      },
+      undefined,
+      undefined,
+      h.ctx,
+    );
+
+    assert.deepEqual(result.details.answers, [{ id: "framed", selected: ["Option A"] }]);
+  });
+});
+
+test("a terminal with no spare rows drops the frame instead of content", async () => {
+  await withTerminalRows(12, async () => {
+    const h = harness([
+      (component) => {
+        const lines = component.render(60);
+        assert.equal(lines.length, 12, `unframed dialog must fill the terminal: ${lines.length}`);
+        assert.doesNotMatch(lines[0], /─/);
+        assert.doesNotMatch(lines.at(-1), /─/);
+        component.handleInput("\r");
+      },
+    ]);
+
+    const result = await h.tool.execute(
+      "ask-unframed",
+      {
+        questions: [{
+          id: "unframed",
+          question: longQuestion(),
+          options: [{ label: "Option A" }, { label: "Option B" }],
+        }],
+      },
+      undefined,
+      undefined,
+      h.ctx,
+    );
+
+    assert.deepEqual(result.details.answers, [{ id: "unframed", selected: ["Option A"] }]);
   });
 });
 

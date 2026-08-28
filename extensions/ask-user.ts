@@ -29,6 +29,7 @@
  */
 
 import {
+	DynamicBorder,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -115,11 +116,28 @@ class QuestionViewport {
 }
 
 function dialogRowBudget(): number {
+	return Math.max(MIN_DIALOG_ROWS, Math.min(MAX_DIALOG_ROWS, terminalRows()));
+}
+
+function terminalRows(): number {
 	const detected = process.stdout.rows;
-	const terminalRows = typeof detected === "number" && Number.isFinite(detected) && detected > 0
+	return typeof detected === "number" && Number.isFinite(detected) && detected > 0
 		? Math.floor(detected)
 		: DEFAULT_TERMINAL_ROWS;
-	return Math.max(MIN_DIALOG_ROWS, Math.min(MAX_DIALOG_ROWS, terminalRows));
+}
+
+// The other dialogs in this setup are bordered, so these two are too — but the
+// frame is paid for out of the slack between the content budget and the real
+// terminal, never out of the question or the choices. A terminal short enough
+// that the budget already fills it gets no border rather than fewer rows.
+function framed(
+	border: DynamicBorder,
+	width: number,
+	rowBudget: number,
+	body: string[],
+): string[] {
+	const edge = terminalRows() - rowBudget >= 2 ? border.render(width) : [];
+	return [...edge, ...body.slice(0, rowBudget), ...edge];
 }
 
 function compactTitle(raw: string): string {
@@ -183,6 +201,7 @@ async function selectQuestion(
 			}
 			return lines;
 		};
+		const border = new DynamicBorder((text: string) => theme.fg("accent", text));
 		const onAbort = () => done(undefined);
 		signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -204,7 +223,7 @@ async function selectQuestion(
 					- (showAction ? 1 : 0)
 					- (showStatus ? 1 : 0));
 				const questionLines = questionBudget > 0 ? viewport.render(width, questionBudget) : [];
-				return [
+				return framed(border, width, rowBudget, [
 					...(showTitle ? [fixedLine(theme.fg("accent", theme.bold(title)), width)] : []),
 					...questionLines,
 					...(showStatus ? [fixedLine(theme.fg("dim", viewport.status()), width)] : []),
@@ -212,7 +231,7 @@ async function selectQuestion(
 					...(showAction
 						? [fixedLine(theme.fg("dim", "↑↓ choices · enter select · esc skip · PgUp/PgDn prompt"), width)]
 						: []),
-				].slice(0, rowBudget);
+				]);
 			},
 			invalidate() {},
 			dispose() {
@@ -236,9 +255,6 @@ async function selectQuestion(
 				tui.requestRender();
 			},
 		};
-	}, {
-		overlay: true,
-		overlayOptions: { width: "90%", anchor: "center", margin: 0 },
 	});
 }
 
@@ -260,6 +276,7 @@ async function inputQuestion(
 		input.onSubmit = (value: string) => done(value);
 		input.onEscape = () => done(undefined);
 		const viewport = new QuestionViewport(new Text(theme.fg("text", question), 1, 0));
+		const border = new DynamicBorder((text: string) => theme.fg("accent", text));
 		const onAbort = () => done(undefined);
 		signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -286,7 +303,7 @@ async function inputQuestion(
 						- (showLabel ? 1 : 0))
 					: 0;
 				const questionLines = questionBudget > 0 ? viewport.render(width, questionBudget) : [];
-				return [
+				return framed(border, width, rowBudget, [
 					...(showTitle ? [fixedLine(theme.fg("accent", theme.bold(title)), width)] : []),
 					...questionLines,
 					...(showStatus ? [fixedLine(theme.fg("dim", viewport.status()), width)] : []),
@@ -295,7 +312,7 @@ async function inputQuestion(
 					...(showAction
 						? [fixedLine(theme.fg("dim", "enter submit · esc skip · PgUp/PgDn prompt"), width)]
 						: []),
-				].slice(0, rowBudget);
+				]);
 			},
 			invalidate: () => input.invalidate(),
 			dispose() {
@@ -307,9 +324,6 @@ async function inputQuestion(
 				tui.requestRender();
 			},
 		};
-	}, {
-		overlay: true,
-		overlayOptions: { width: "90%", anchor: "center", margin: 0 },
 	});
 }
 
