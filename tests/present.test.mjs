@@ -275,9 +275,43 @@ test("literal validation preserves inline code, URLs, paths, and numbers", () =>
     rewrite.replace("/tmp/example/pi-setup/config.json", "/tmp/example/config.json"),
     rewrite.replace("https://example.com/docs/v2", "https://example.com/docs/v3"),
     rewrite.replace("42%", "43%"),
+    // A quantity that was never in the source is a new claim.
+    `${rewrite}\nIt finishes in 4200ms.`,
   ]) {
     assert.equal(preservesProtectedLiterals(source, changed), false);
   }
+});
+
+test("prose slashes are not paths and repetition counts are the rewrite's business", () => {
+  // Both halves were measured end to end: prose slash tokens caused every
+  // rewrite rejection observed against real answers, and exact repetition
+  // counts rejected rewrites that lost nothing at all.
+  const prose = "Answer yes/no for Pro/Max, then open the patch/PR.";
+  assert.deepEqual(protectedLiterals(prose), []);
+  assert.equal(preservesProtectedLiterals(prose, "Answer with yes or no for the Pro and Max plans, then open the patch."), true);
+
+  // A real path keeps its protection: it carries a dot or a third segment.
+  const withPath = "Edit src/index.ts and pi/agent/extensions/statusline.ts.";
+  assert.deepEqual(protectedLiterals(withPath), ["pi/agent/extensions/statusline.ts", "src/index.ts"]);
+  assert.equal(preservesProtectedLiterals(withPath, "Edit src/index.ts only."), false);
+
+  // Saying the same thing once instead of twice is not a loss.
+  const twice = "Run `pi doctor`. Then run `pi doctor` again after 2 minutes.";
+  assert.equal(preservesProtectedLiterals(twice, "Run `pi doctor`, and repeat it after 2 minutes."), true);
+  // Dropping its only mention still is.
+  assert.equal(preservesProtectedLiterals(twice, "Run the doctor, and repeat after 2 minutes."), false);
+});
+
+test("a path is not carved out of the middle of a word", () => {
+  // `yes/no` used to also yield `/no`, so one prose word produced two literals
+  // the rewrite then had to reproduce verbatim.
+  assert.deepEqual(protectedLiterals("Answer yes/no."), []);
+  // A genuine path still matches both the anchored and the bare form; each
+  // survives together, so the duplication costs the rewrite nothing.
+  assert.deepEqual(
+    protectedLiterals("Open /tmp/example/config.json."),
+    ["/tmp/example/config.json", "tmp/example/config.json"],
+  );
 });
 
 test("present is off by default and non-TUI or delegated modes never start a child", async () => {

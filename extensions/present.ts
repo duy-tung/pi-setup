@@ -23,9 +23,18 @@ import {
   type RpcSessionState,
 } from "./lib/subagent-rpc.ts";
 
-export const PRESENT_MODEL = "openai-codex/gpt-5.6-sol:off";
 export const PRESENT_MODEL_PROVIDER = "openai-codex";
 export const PRESENT_MODEL_ID = "gpt-5.6-sol";
+/**
+ * Thinking stays off. Measured end to end against real answers from this
+ * machine's history, `low` passed exactly as many rewrites as `off` (4 of 6)
+ * at the same latency, so the extra tokens buy nothing here.
+ */
+export const PRESENT_THINKING_LEVEL = "off";
+// Derived, not repeated: the spawn argument and the ownership check below must
+// name the same child. Drifting one of them makes every rewrite fail the check
+// silently, with the original answer left untouched and no diagnostic.
+export const PRESENT_MODEL = `${PRESENT_MODEL_PROVIDER}/${PRESENT_MODEL_ID}:${PRESENT_THINKING_LEVEL}`;
 export const PRESENT_MIN_PROSE_CHARS = 200;
 export const PRESENT_TIMEOUT_MS = 90_000;
 export const PRESENT_MAX_SOURCE_BYTES = 256 * 1024;
@@ -167,6 +176,22 @@ function matches(text: string, pattern: RegExp): string[] {
     .filter(Boolean);
 }
 
+/**
+ * A bare `a/b` token is a path only when it carries a path-like signal. Prose is
+ * full of slashes — `yes/no`, `Pro/Max`, `patch/PR`, `dev/proj` — and demanding
+ * those survive verbatim fights the whole point of rewriting into plainer
+ * language. Measured against this machine's session history, prose slash tokens
+ * were the sole cause of every rewrite rejection observed end to end.
+ */
+function looksLikePath(token: string): boolean {
+  return token.includes(".") || token.split("/").length >= 3;
+}
+
+/** A literal that states a quantity; a new one of these would be a new claim. */
+function isNumericLiteral(literal: string): boolean {
+  return /^v?-?\d/.test(literal);
+}
+
 /** Literal tokens whose silent mutation would make a display rewrite misleading. */
 export function protectedLiterals(text: string): string[] | undefined {
   const prose = proseWithoutFences(text);
@@ -174,16 +199,29 @@ export function protectedLiterals(text: string): string[] | undefined {
   return [
     ...matches(prose, /(`+)([^`\n]+?)\1/g),
     ...matches(prose, /\bhttps?:\/\/[^\s<>()\[\]{}"']+/g),
-    ...matches(prose, /(?:~\/|\/|\.\.?\/)[A-Za-z0-9._~@%+,:=-]+(?:\/[A-Za-z0-9._~@%+,:=-]+)*/g),
-    ...matches(prose, /\b(?:[A-Za-z0-9._@+~-]+\/)+[A-Za-z0-9._@+~:-]+\b/g),
+    // The lookbehind keeps this from carving a fake path out of the middle of a
+    // word: without it `yes/no` also yields `/no`, and both then had to survive.
+    ...matches(prose, /(?<![A-Za-z0-9])(?:~\/|\/|\.\.?\/)[A-Za-z0-9._~@%+,:=-]+(?:\/[A-Za-z0-9._~@%+,:=-]+)*/g),
+    ...matches(prose, /\b(?:[A-Za-z0-9._@+~-]+\/)+[A-Za-z0-9._@+~:-]+\b/g).filter(looksLikePath),
     ...matches(prose, /(?<![A-Za-z0-9_])v?-?\d+(?:[.,:/-]\d+)*(?:%|[A-Za-z]{1,5})?(?![A-Za-z0-9_])/g),
   ].sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * Nothing may disappear and no quantity may be invented — but how often a
+ * literal recurs is the rewrite's business. Comparing repetition counts exactly
+ * rejected faithful rewrites that lost nothing: merging two sentences that both
+ * cite the same symbol, or numbering a list differently, changed a count and
+ * threw the whole rewrite away.
+ */
 export function preservesProtectedLiterals(source: string, rewrite: string): boolean {
   const before = protectedLiterals(source);
   const after = protectedLiterals(rewrite);
-  return before !== undefined && after !== undefined && JSON.stringify(before) === JSON.stringify(after);
+  if (before === undefined || after === undefined) return false;
+  const kept = new Set(after);
+  if (before.some((literal) => !kept.has(literal))) return false;
+  const known = new Set(before);
+  return !after.some((literal) => !known.has(literal) && isNumericLiteral(literal));
 }
 
 export function buildPresentCliArgs(invocation: PiInvocation): string[] {
@@ -206,7 +244,7 @@ export function buildPresentCliArgs(invocation: PiInvocation): string[] {
 function validChildState(state: RpcSessionState): boolean {
   return state.model?.provider === PRESENT_MODEL_PROVIDER
     && state.model.id === PRESENT_MODEL_ID
-    && state.thinkingLevel === "off";
+    && state.thinkingLevel === PRESENT_THINKING_LEVEL;
 }
 
 function fmtTokens(value: number | undefined): string | undefined {

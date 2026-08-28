@@ -274,6 +274,14 @@ nguồn authority. Rewrite chỉ để hiển thị, fail-open, không tạo dur
 được cộng vào parent footer totals. Fenced code cùng literal number, URL, path và inline code
 phải giữ exact; mutation làm rewrite bị drop. `/reload` reset nó về off.
 
+Validator đòi **không được mất gì** và **không được bịa số**, nhưng không so số lần lặp lại —
+gộp hai câu cùng nhắc một ký hiệu là việc rewrite phải làm. Token văn xuôi dạng `a/b`
+(`yes/no`, `Pro/Max`) không bị coi là path. Cả hai đến từ việc chạy pipeline thật trên answer
+trong lịch sử máy này: đếm số lần lặp và slash trong văn xuôi là nguyên nhân của *mọi* lần bị
+loại quan sát được, trên các rewrite không mất gì cả. Thinking level để `off` và được derive
+vào `PRESENT_MODEL` chứ không viết lặp — `low` pass đúng 4/6 như `off` với cùng latency, còn
+lệch giữa tham số spawn và ownership check thì mọi rewrite fail im lặng.
+
 ## 6. Anthropic cache
 
 Với `PI_CACHE_RETENTION=long`, fork dùng TTL một giờ. Conversation thành công có prompt từ

@@ -290,7 +290,17 @@ private one-shot `--mode rpc --no-session` child uses the exact Pi executable an
 session. The answer travels over RPC stdin rather than a plaintext prompt file. Session/leaf
 generation guards, latest-wins cancellation, exact fenced-code checks, literal
 number/URL/path/inline-code validation, bounded output, and process-group teardown prevent
-mutated or stale rewrites from attaching to another turn. The custom
+mutated or stale rewrites from attaching to another turn.
+
+Literal validation asks that nothing disappears and that no quantity is invented; it does
+not compare how often a literal recurs, because merging two sentences that cite the same
+symbol is a rewrite doing its job. Bare `a/b` prose tokens (`yes/no`, `Pro/Max`) are not
+treated as paths. Both rules come from running the real pipeline over answers from this
+machine's history: exact repetition counts and prose slash tokens together caused every
+rejection observed, on rewrites that had lost nothing. The thinking level is `off` and
+derived into `PRESENT_MODEL` rather than restated — `low` passed the same 4 of 6 rewrites
+at the same latency, and a drift between the spawn argument and the ownership check would
+fail every rewrite silently. The custom
 entry shows per-rewrite model/token/cost metadata but does not add that usage to parent
 session totals. The original answer remains authoritative; any failure shows nothing.
 
