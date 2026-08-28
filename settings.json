@@ -54,7 +54,7 @@
     "anthropicExtraUsage": false
   },
   "lastChangelogVersion": "0.84.3",
-  "defaultModel": "claude-fable-5",
+  "defaultModel": "claude-opus-5",
   "packages": [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
     "npm:pi-web-search@1.3.1",
