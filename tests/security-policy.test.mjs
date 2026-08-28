@@ -46,7 +46,12 @@ function captureHandler(mode = "auto") {
   return handler;
 }
 
-function context(cwd, approved = true) {
+/**
+ * `approved` answers a plain confirm. `remember` picks the "Always allow ..."
+ * branch of the ask-once selector instead of the one-shot branch, so a test can
+ * drive both halves of the Claude Code prompt.
+ */
+function context(cwd, approved = true, remember = false) {
   const calls = [];
   return {
     calls,
@@ -55,8 +60,14 @@ function context(cwd, approved = true) {
       hasUI: true,
       ui: {
         async confirm(title, message) {
-          calls.push({ title, message });
+          calls.push({ kind: "confirm", title, message });
           return approved;
+        },
+        async select(title, options) {
+          calls.push({ kind: "select", title, message: title, options });
+          if (!approved) return options.at(-1);
+          const always = options.find((option) => option.startsWith("Always allow "));
+          return remember && always ? always : options[0];
         },
       },
     },
@@ -180,7 +191,10 @@ test("permission modes enforce the edit and Bash decision matrix", async () => {
     ctx = context(f.work, true);
     assert.equal(await handler({ toolName: "edit", input: { path: workspaceFile, oldText: "a", newText: "b" } }, ctx.value), undefined);
     assert.equal(ctx.calls.length, 0);
+    // An allow rule is a standing answer and holds in accept-edits.
     assert.equal(await handler({ toolName: "bash", input: { command: "git status" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 0);
+    assert.equal(await handler({ toolName: "bash", input: { command: "pwd" } }, ctx.value), undefined);
     assert.equal(ctx.calls.length, 1);
 
     handler = captureHandler("plan");
@@ -251,6 +265,56 @@ test("Bypass skips prompts but preserves credential and write-boundary hard stop
     rmSync(external, { recursive: true, force: true });
     resetPermissionRuntime();
   }
+});
+
+test("a remembered outside write is scoped to the repository, not the deep subdirectory", async () => {
+  // The whole value of remembering is that one answer covers the repository.
+  // Suggesting the file's own directory would re-prompt per subdirectory.
+  const f = fixture();
+  // Outside the workspace *and* outside temp, since temp is free by design.
+  const repo = mkdtempSync(join(homedir(), ".pi-policy-repo-"));
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(join(repo, "src", "deep"), { recursive: true });
+  try {
+    const handler = captureHandler("auto");
+    const ctx = context(f.work, true, true);
+    const target = join(realpathSync.native(repo), "src", "deep", "file.ts");
+    assert.equal(await handler({ toolName: "edit", input: { path: target, oldText: "a", newText: "b" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, 1);
+    assert.equal(ctx.calls[0].kind, "select");
+    const always = ctx.calls[0].options.find((option) => option.startsWith("Always allow "));
+    assert.equal(always, `Always allow Edit(${realpathSync.native(repo)}/**)`);
+  } finally {
+    f.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+    resetPermissionRuntime();
+  }
+});
+
+test("a session started in $HOME still stops at protected and credential paths", async () => {
+  // Auto now treats the working directory as the workspace, so with cwd=$HOME
+  // ordinary writes are silent. The protected-write and sensitive-path layers
+  // are what keep that loosening safe, so assert them at exactly that cwd.
+  const home = realpathSync.native(homedir());
+  const handler = captureHandler("auto");
+  const ctx = context(home, true);
+
+  const scratch = join(home, ".pi-policy-home-scratch.txt");
+  assert.equal(await handler({ toolName: "write", input: { path: scratch, content: "x" } }, ctx.value), undefined);
+  assert.equal(ctx.calls.length, 0, "ordinary writes under the working directory must not prompt");
+
+  for (const target of [join(home, ".zshrc"), join(home, ".gitconfig"), join(home, ".pi", "agent", "settings.json")]) {
+    const before = ctx.calls.length;
+    assert.equal(await handler({ toolName: "write", input: { path: target, content: "x" } }, ctx.value), undefined);
+    assert.equal(ctx.calls.length, before + 1, `protected write must still ask: ${target}`);
+    assert.equal(ctx.calls.at(-1).kind, "confirm", "protected writes never offer to stop asking");
+  }
+
+  const credential = await handler({ toolName: "write", input: { path: join(home, ".ssh", "config") } }, ctx.value);
+  assert.equal(credential.block, true);
+  const env = await handler({ toolName: "read", input: { path: join(home, ".env") } }, ctx.value);
+  assert.equal(env.block, true);
+  resetPermissionRuntime();
 });
 
 test("work subagent activation is broad-approved in Manual and blocked in Plan", async () => {

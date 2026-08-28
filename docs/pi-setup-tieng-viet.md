@@ -190,9 +190,10 @@ Lệnh setup cần nhớ:
 
 `/mode` hoặc `Ctrl+Alt+M` mở selector năm dòng:
 
-- **Auto** (default): workspace edit và Bash thông thường chạy dưới policy/sandbox; known
-  commit, push, delete, publish, deploy, destructive, protected hoặc outside-write pattern sẽ
-  hỏi. Regex không exhaustive, nên model vẫn phải tuân authority rules trong `AGENTS.md`.
+- **Auto** (default): theo permission model của Claude Code, xem [Permission rules](#permission-rules).
+  Workspace edit và Bash thông thường chạy dưới policy/sandbox; known commit, delete, publish,
+  deploy, destructive, protected pattern sẽ hỏi, và phần lớn prompt có kèm lựa chọn thôi hỏi
+  lần sau. Rule không exhaustive, nên model vẫn phải tuân authority rules trong `AGENTS.md`.
 - **Manual**: dedicated read/search tools chạy tự do; mỗi `edit`/`write`, mỗi Bash call và
   mỗi work-child activation đều hỏi một lần.
 - **Accept edits**: ordinary `edit`/`write` trong workspace tự chạy; Bash, protected/outside
@@ -209,6 +210,43 @@ Auto/Manual/Accept edits/Plan đi theo active session branch. Bypass reset về 
 `/reload`, resume, fork hoặc session mới. Không đổi mode khi parent đang chạy; mode change và
 conversation-tree navigation đều bị chặn khi work child đang starting/running. Wait hoặc
 interrupt child trước.
+
+### Permission rules
+
+`extensions/lib/permission-rules.ts` port permission model của Claude Code. Rule có dạng
+`Tool(specifier)` — `Bash(git push *)`, `Edit(/path/**)` — chia ba tier, thứ tự ưu tiên là
+**deny > ask > allow**. `Bash(prefix *)` khớp command và mọi argument của nó; specifier path
+kết thúc bằng `/**` khớp cả subtree.
+
+Command được khớp **sau khi** bóc body heredoc và chuỗi trích dẫn, rồi tách theo `&&`/`;`/`|`
+và xét từng đoạn, đoạn nặng nhất thắng. Nhờ vậy viết một file test mà trong nội dung có chữ
+`git commit` không còn kích hoạt prompt commit nữa.
+
+| Tier | Hành vi |
+|---|---|
+| `deny` | Chặn cứng. Đọc credential (`gh auth token`, `op read`, dump keychain) và lệnh phá thiết bị (`mkfs`, `shred`, `diskutil erase`). Không thể override. |
+| `ask` | Hỏi. Phần lớn kèm **Always allow `<rule>`**, ghi một learned rule huỷ luôn default rule đã hỏi. Nhóm `NEVER_REMEMBER` — `sudo`, `git push`, publish, deploy, `shutdown` — luôn hỏi lại, vì nó ra khỏi máy này hoặc không undo được từ đây. |
+| `allow` | Im lặng. `git status`/`diff`/`log`/`show` và `gh pr view`/`diff` chỉ đọc. |
+| unmatched | Chạy trong Auto. Hỏi trong Manual và Accept edits. |
+
+Hai chỗ cố ý khác Claude Code, đều vì setup này có lớp bảo vệ mà Claude Code không có:
+
+- **Bash unmatched chạy thẳng trong Auto.** Claude Code buộc phải hỏi mọi lệnh lạ vì không có
+  gì confine nó. Ở đây `sandbox-bash.ts` cấp cho mỗi lệnh một Seatbelt profile giới hạn ghi
+  trong workspace + temp và làm credential không đọc được, còn `tree-rewind` đã checkpoint
+  workspace. Hỏi hết sẽ tốn 725 prompt lần-đầu tính trên toàn bộ session history của máy này.
+- **`rm -rf` chỉ hỏi chứ không bị deny.** Cũng nhờ hai lớp trên, một lệnh xoá đã bị confine và
+  đã có checkpoint thì khôi phục được.
+
+Auto coi working directory của session là workspace và không hỏi lại bên trong nó, giống
+Claude Code. Protected write (`~/.zshrc`, `~/.gitconfig`, `~/.pi/agent`, `.git/config` và hooks
+của project) cùng sensitive path vẫn giữ prompt riêng và chặn cứng — đó chính là thứ giữ an
+toàn khi session mở từ `$HOME`.
+
+Learned rule nằm ở `~/.local/state/pi-setup/permission-rules.json`, cố ý đặt ngoài managed
+config được parity check, để việc nhớ một câu trả lời không bị tính là install drift. File được
+đọc lại trước mỗi lần ghi nên hai session song song không đè mất câu trả lời của nhau, và file
+hỏng thì coi như không có learned rule chứ không làm gate fail. Xoá file này để quên toàn bộ.
 
 Pi 0.84.3 không còn tự ghi `/model` hoặc `/thinking` selection vào global settings. Enter chỉ
 đổi session; Ctrl+S mới persist. Vì `settings.json` do repo quản lý, chỉ dùng Ctrl+S khi chủ ý

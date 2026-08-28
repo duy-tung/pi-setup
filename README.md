@@ -187,8 +187,9 @@ turn.
 | `runtime-context.ts` | Adds branch, dirty state, and date snapshots without duplicating Pi core's cwd system instruction |
 
 `/mode` opens a five-row selector; `Ctrl+Alt+M` opens the same UI. Auto is the default
-and stays low-friction while asking for recognized commit, push, deletion, publishing,
-deployment, and destructive command patterns. Pattern matching is deliberately not an
+and follows the permission model described under [Permission rules](#permission-rules):
+recognized commit, deletion, publishing, deployment, and destructive command patterns ask,
+and most of those prompts offer to stop asking. Pattern matching is deliberately not an
 exhaustive shell policy, so the model must still obey `AGENTS.md` authority rules. Manual
 asks once for every edit/write, every Bash call, and every mutation-capable work-child
 activation. Accept edits allows ordinary
@@ -203,6 +204,46 @@ delete user work. Bash stays workspace-confined, built-in protected/outside writ
 credential access stay blocked, and RPC children retain their fixed independent policy.
 Reload, resume, fork, or a new session returns Bypass to Auto. Mode changes and
 conversation-tree navigation are refused while a work child is starting/running.
+
+### Permission rules
+
+`extensions/lib/permission-rules.ts` implements Claude Code's permission model. Rules are
+`Tool(specifier)` strings — `Bash(git push *)`, `Edit(/path/**)` — in three tiers whose
+precedence is **deny > ask > allow**. `Bash(prefix *)` matches a command and its arguments;
+a path specifier ending in `/**` matches a subtree.
+
+A command is matched after heredoc bodies and quoted literals are stripped, and each
+`&&`/`;`/`|` segment is judged separately with the most severe decision winning. Writing a
+test file whose body mentions `git commit` therefore no longer trips the commit prompt.
+
+| Tier | Behavior |
+|---|---|
+| `deny` | Hard block. Credential reads (`gh auth token`, `op read`, keychain dumps) and device-destroying writes (`mkfs`, `shred`, `diskutil erase`). Never overridable. |
+| `ask` | Prompts. Most entries offer **Always allow `<rule>`**, which files a learned rule that cancels the default. The `NEVER_REMEMBER` subset — `sudo`, `git push`, publish, deploy, `shutdown` — always re-asks, because it reaches outside this machine or cannot be undone from here. |
+| `allow` | Silent. Read-only `git status`/`diff`/`log`/`show` and `gh pr view`/`diff`. |
+| unmatched | Runs in Auto. Asks in Manual and Accept edits. |
+
+Two places deliberately depart from Claude Code, both because this setup has layers Claude
+Code does not:
+
+- **Unmatched Bash runs in Auto.** Claude Code must ask about every unfamiliar command
+  because nothing else confines it. Here `sandbox-bash.ts` gives each command a Seatbelt
+  profile that limits writes to the workspace and temp and makes credentials unreadable,
+  and `tree-rewind` checkpoints the workspace. Asking anyway would have cost 725 first-time
+  prompts across this machine's session history.
+- **`rm -rf` asks rather than being denied.** The same two layers make a confined,
+  checkpointed delete recoverable.
+
+Auto treats the session's working directory as the workspace and does not re-ask inside it,
+as Claude Code does. Protected writes (`~/.zshrc`, `~/.gitconfig`, `~/.pi/agent`, project
+`.git/config` and hooks) and sensitive paths keep their own prompt and hard block
+regardless, which is what keeps that safe when a session starts in `$HOME`.
+
+Learned rules live in `~/.local/state/pi-setup/permission-rules.json`, deliberately outside
+the parity-checked managed config so that remembering an answer never registers as install
+drift. The file is re-read before each write so concurrent sessions do not discard one
+another's answers, and a corrupt file degrades to no learned rules rather than failing the
+gate. Delete it to forget every remembered answer.
 
 ### Interaction and orchestration
 

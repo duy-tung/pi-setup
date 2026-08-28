@@ -4,71 +4,41 @@
  * Credential hard-denies and canonical path identity are invariant. The active
  * permission mode then decides whether an operation runs, asks once, or blocks.
  * Bash confinement remains independently owned by sandbox-bash.ts.
+ *
+ * Auto follows Claude Code's permission model: rules in `Tool(specifier)` form
+ * are sorted into deny > ask > allow, and anything unmatched asks once and
+ * offers to remember the answer. The previous gate could only ask yes/no, so
+ * the same question came back on every call — measured over this machine's
+ * session history that was 394 of 400 write/edit calls, because a session
+ * started in $HOME made every write look like a boundary crossing.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isUnder, isTemporary, isUnsafeWorkspaceRoot, protectedWrite, resolvePolicyPath, sensitivePath } from "./lib/path-policy.ts";
+import { isUnder, isTemporary, protectedWrite, resolvePolicyPath, sensitivePath } from "./lib/path-policy.ts";
 import {
   getPermissionMode,
   isNoApprovalTool,
   permissionSubagentProfile,
 } from "./lib/permission-mode.ts";
-
-/** Bash commands that pause in Auto. First match wins. */
-export const CONFIRM_CMD: { id: string; re: RegExp; what: string }[] = [
-  { id: "sudo", re: /\bsudo\b/, what: "sudo (root privileges)" },
-  {
-    id: "rm-recursive-force",
-    re: /\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf]|\brm\s+.*--(force|recursive)\b/,
-    what: "rm with -r/-f (recursive/forced delete)",
-  },
-  { id: "find-delete", re: /\bfind\b[^\n|;]*\s-delete\b/, what: "find -delete (bulk delete)" },
-  { id: "xargs-rm", re: /\bxargs\b[^\n|;]*\brm\b/, what: "xargs rm (bulk delete)" },
-  { id: "delete", re: /\b(rm|rmdir)\b/, what: "file or directory deletion" },
-  {
-    id: "git-commit-push",
-    re: /\bgit\b[^\n|;&]*\b(commit|push)\b/,
-    what: "git commit/push (persistent or remote change)",
-  },
-  {
-    id: "git-destructive",
-    re: /\bgit\s+(push\b[^\n]*(--force\b|--force-with-lease\b|\s-f\b|--delete\b|\s:\S)|reset\s+--hard\b|clean\s+(-[a-zA-Z]*f|--force)|branch\s+(-D\b|--delete\s+--force))/,
-    what: "destructive git (force-push, hard reset, clean, branch -D)",
-  },
-  {
-    id: "disk-destroyer",
-    re: /\bdd\b[^\n|;]*\bof=|\b(mkfs|diskutil\s+(erase\w*|partitionDisk)|shred)\b/,
-    what: "raw disk write / erase",
-  },
-  {
-    id: "recursive-perms",
-    re: /\b(chmod|chown)\s+(-[a-zA-Z]*R[a-zA-Z]*\b|--recursive\b)/,
-    what: "recursive chmod/chown",
-  },
-  {
-    id: "pipe-to-shell",
-    re: /\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?\S*(sh|bash|zsh)\b/,
-    what: "piping a download into a shell",
-  },
-  {
-    id: "deploy-remote",
-    re: /\b(kubectl\s+(apply|create|delete|replace|patch|set|rollout|scale)|helm\s+(install|upgrade|uninstall|rollback)|terraform\s+(apply|destroy|import|taint|untaint)|pulumi\s+(up|destroy|import)|vercel\s+(deploy|--prod)|(?:fly|flyctl)\s+deploy|railway\s+up|wrangler\s+(deploy|publish|delete)|serverless\s+(deploy|remove)|docker\s+push|gh\s+(release\s+(create|delete)|repo\s+delete|pr\s+merge))\b/,
-    what: "deployment or remote mutation",
-  },
-  { id: "power", re: /\b(shutdown|reboot|halt)\b/, what: "shutdown/reboot" },
-  { id: "publish", re: /\b(npm|pnpm|yarn)\s+publish\b/, what: "package publish (public, irreversible)" },
-];
-
-const DENY_CMD: { re: RegExp; what: string }[] = [
-  { re: /\bgh\s+auth\s+token\b/, what: "GitHub authentication token" },
-  { re: /\bsecurity\s+(find-generic-password|find-internet-password|dump-keychain)\b/, what: "macOS keychain dump" },
-  { re: /\bpass\s+show\b/, what: "pass secret store" },
-  { re: /\bop\s+(read|item\s+get)\b/, what: "1Password secret read" },
-];
+import {
+  decideBash,
+  decidePath,
+  effectiveRules,
+  isRememberable,
+  rememberRule,
+  suggestPathRule,
+} from "./lib/permission-rules.ts";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const IS_SUBAGENT = Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "write", "edit"]);
 const MUTATING_TOOLS = new Set(["write", "edit"]);
+
+function blocked(reason: string) {
+  return { block: true as const, reason };
+}
 
 function commandPaths(command: string): string[] {
   return command
@@ -76,11 +46,60 @@ function commandPaths(command: string): string[] {
     .filter((token) => token && !token.startsWith("-") && !/[*?]/.test(token));
 }
 
-function blocked(reason: string) {
-  return { block: true as const, reason };
+/**
+ * The unit a remembered write approval is scoped to: the enclosing repository
+ * if there is one, otherwise the containing directory. Approving "writes under
+ * ~/repos/pi-setup" is a claim a user can actually evaluate; approving "writes
+ * under $HOME" is not.
+ */
+function writeRoot(path: string): string {
+  let current = dirname(path);
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (existsSync(join(current, ".git"))) return current;
+    const parent = dirname(current);
+    // Ascend to the repository, not to $HOME: a bare directory high up is not a
+    // scope a user can meaningfully approve.
+    if (parent === current || current === homedir()) break;
+    current = parent;
+  }
+  return dirname(path);
 }
 
-async function confirmOnce(ctx: any, what: string, detail: string, cwd: string) {
+async function askOnce(
+  ctx: any,
+  what: string,
+  detail: string,
+  cwd: string,
+  suggestion: string,
+) {
+  if (!ctx.hasUI || IS_SUBAGENT) {
+    return blocked(
+      `permission-gate: ${what} requires user approval, but no attended UI is available. `
+        + "Do not retry or work around it; report the exact operation to the user.",
+    );
+  }
+
+  const once = "Allow once";
+  const always = suggestion ? `Always allow ${suggestion}` : "";
+  const deny = "Deny";
+  const options = always ? [once, always, deny] : [once, deny];
+  // select() carries no message field, so the operation travels in the title.
+  const choice = await ctx.ui.select(
+    `permission-gate: ${what}\n\nWorking directory:\n${cwd}\n\nOperation:\n${detail}`,
+    options,
+  );
+
+  if (choice === always) {
+    rememberRule("allow", suggestion);
+    return undefined;
+  }
+  if (choice === once) return undefined;
+  // A dismissed dialog is not consent.
+  return blocked(`permission-gate: user denied ${what}. Do not retry or work around it.`);
+}
+
+/** Always-ask authority: no remember option, however often it recurs. */
+async function confirmEveryTime(ctx: any, what: string, detail: string, cwd: string) {
   if (!ctx.hasUI || IS_SUBAGENT) {
     return blocked(
       `permission-gate: ${what} requires user approval, but no attended UI is available. `
@@ -118,13 +137,10 @@ export default function (pi: ExtensionAPI) {
     const cwd = ctx.cwd ?? process.cwd();
     const workspace = resolvePolicyPath(cwd, cwd).canonical;
     const mode = getPermissionMode();
+    const rules = effectiveRules();
 
     if (event.toolName === "bash") {
       const command = String((event.input as { command?: string }).command ?? "");
-      const denied = DENY_CMD.find((rule) => rule.re.test(command));
-      if (denied) {
-        return blocked(`permission-gate: blocked ${denied.what}. Ask the user to run it manually if required.`);
-      }
       for (const token of commandPaths(command)) {
         const resolved = resolvePolicyPath(token, cwd);
         const sensitive = sensitivePath(resolved.canonical);
@@ -132,15 +148,36 @@ export default function (pi: ExtensionAPI) {
           return blocked(`permission-gate: '${token}' resolves to ${sensitive.what}. Credential access is blocked.`);
         }
       }
+
+      const decision = decideBash(rules, command);
+      if (decision.tier === "deny") {
+        return blocked(
+          `permission-gate: blocked by rule ${decision.rule}. Ask the user to run it manually if required.`,
+        );
+      }
       if (mode === "plan") {
         return blocked("permission-gate: Bash is unavailable in Plan mode. Use dedicated read/search tools or ask the user to change mode.");
       }
       if (mode === "bypass") return;
-      const dangerous = CONFIRM_CMD.find((rule) => rule.re.test(command));
-      if (mode === "manual" || mode === "accept-edits") {
-        return confirmOnce(ctx, dangerous?.what ?? "Bash command", command, workspace);
+      if (decision.tier === "ask") {
+        // The suggestion is the matched rule itself so that remembering the
+        // answer cancels exactly the rule that asked.
+        return isRememberable(decision.rule)
+          ? askOnce(ctx, `Bash matching ${decision.rule}`, command, workspace, decision.rule)
+          : confirmEveryTime(ctx, `Bash matching ${decision.rule}`, command, workspace);
       }
-      return dangerous ? confirmOnce(ctx, dangerous.what, command, workspace) : undefined;
+      // An allow rule is the user's standing answer, so it holds everywhere
+      // except Manual, whose entire purpose is to ask about every command.
+      if (decision.tier === "allow" && mode !== "manual") return;
+      // Manual and Accept-edits are deliberate ask-about-everything modes, and
+      // offer no "always" option: a per-command prefix is far too fine-grained
+      // to learn from (725 distinct ones across this machine's history).
+      if (mode === "manual" || mode === "accept-edits") {
+        return askOnce(ctx, "Bash command", command, workspace, "");
+      }
+      // Auto: unmatched commands run. The Seatbelt profile, not a prompt, is
+      // what keeps them inside the workspace.
+      return;
     }
 
     if (PATH_TOOLS.has(event.toolName)) {
@@ -163,22 +200,50 @@ export default function (pi: ExtensionAPI) {
         return blocked(`permission-gate: ${event.toolName} is unavailable in Plan mode. Ask the user to change mode before modifying files.`);
       }
 
+      const tool = event.toolName === "edit" ? "Edit" : "Write";
+      const decision = decidePath(rules, tool, resolved.canonical);
+      if (decision.tier === "deny") {
+        return blocked(`permission-gate: writing ${resolved.canonical} is blocked by rule ${decision.rule}.`);
+      }
+
       const protectedHit = protectedWrite(resolved.canonical, workspace);
-      const outside = !isUnder(resolved.canonical, workspace) && !isTemporary(resolved.canonical);
-      const broadRoot = isUnsafeWorkspaceRoot(workspace) && !isTemporary(resolved.canonical);
-      const boundary = protectedHit || outside || broadRoot;
-      const what = protectedHit?.what ?? (broadRoot ? "writing from a broad workspace root" : outside ? "writing outside the workspace" : "file change");
       const detail = resolved.requested === resolved.canonical
         ? resolved.canonical
         : `${resolved.requested}\nresolves to: ${resolved.canonical}`;
 
-      if (mode === "bypass") {
-        return boundary
-          ? blocked(`permission-gate: Bypass skips prompts but does not permit ${what}. Ask the user to perform it directly if required.`)
-          : undefined;
+      if (protectedHit) {
+        if (mode === "bypass") {
+          return blocked(
+            `permission-gate: Bypass skips prompts but does not permit writing ${protectedHit.what}. `
+              + "Ask the user to perform it directly if required.",
+          );
+        }
+        return confirmEveryTime(ctx, protectedHit.what, detail, workspace);
       }
-      if (mode === "manual") return confirmOnce(ctx, what, detail, workspace);
-      return boundary ? confirmOnce(ctx, what, detail, workspace) : undefined;
+
+      // Claude Code treats the session's working directory as the workspace and
+      // does not re-ask inside it; temp is likewise free. That is what removes
+      // the old broad-root prompt on every write when a session starts in $HOME.
+      const inside = isUnder(resolved.canonical, workspace) || isTemporary(resolved.canonical);
+      const permitted = inside || decision.tier === "allow";
+      const suggestion = suggestPathRule(tool, writeRoot(resolved.canonical));
+
+      // Bypass suppresses prompts; it has never granted authority the user has
+      // not given, so a write past the workspace edge stays a hard stop.
+      if (mode === "bypass") {
+        return permitted
+          ? undefined
+          : blocked(
+              "permission-gate: Bypass skips prompts but does not permit writing outside the workspace. "
+                + "Ask the user to perform it directly if required.",
+            );
+      }
+      if (decision.tier === "ask") {
+        return confirmEveryTime(ctx, `file change matching ${decision.rule}`, detail, workspace);
+      }
+      if (mode === "manual") return askOnce(ctx, "file change", detail, workspace, suggestion);
+      if (permitted) return;
+      return askOnce(ctx, "writing outside the workspace", detail, workspace, suggestion);
     }
 
     const delegation = workDelegation({ toolName: event.toolName, input: event.input as Record<string, unknown> });
@@ -188,7 +253,7 @@ export default function (pi: ExtensionAPI) {
         return blocked("permission-gate: work subagents are unavailable in Plan mode; use explore or web instead.");
       }
       if (mode === "manual" || mode === "accept-edits") {
-        return confirmOnce(ctx, "mutation-capable work subagent", delegation.detail, workspace);
+        return confirmEveryTime(ctx, "mutation-capable work subagent", delegation.detail, workspace);
       }
       return;
     }
@@ -198,7 +263,7 @@ export default function (pi: ExtensionAPI) {
       return blocked(`permission-gate: unknown tool '${event.toolName}' is unavailable in Plan mode because its side effects are not declared.`);
     }
     if (mode === "manual" || mode === "accept-edits") {
-      return confirmOnce(ctx, `tool '${event.toolName}' with unknown side effects`, event.toolName, workspace);
+      return confirmEveryTime(ctx, `tool '${event.toolName}' with unknown side effects`, event.toolName, workspace);
     }
     // Auto preserves the setup's existing behavior; Bypass skips soft prompts.
   });
