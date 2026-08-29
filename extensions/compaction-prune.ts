@@ -4,7 +4,7 @@
  * Ported from DeepSeek Harness (compaction-tool-result-pruner): a deterministic,
  * model-free rewrite that runs BEFORE the compaction LLM call. pi's
  * generateSummary serializes the entire to-summarize region into one prompt
- * with no size cap (core/compaction/compaction.js:456-485), so a stale 50 KiB
+ * with no size cap (core/compaction/compaction.js:471-516), so a stale 50 KiB
  * `read` result (spill deliberately skips reads) rides into the summarizer
  * verbatim — slow, expensive, and it drowns the signal the summary needs.
  *
@@ -16,7 +16,8 @@
  * session file keeps the originals forever.
  *
  * Mechanics: core reuses the same `preparation` object after the
- * session_before_compact event (AgentSession.compact/_runAutoCompaction, verified v0.84.3),
+ * session_before_compact event (AgentSession.compact/_runAutoCompaction, verified v0.84.4;
+ * the 0.84.4 mid-run threshold path funnels into _runAutoCompaction, same hook),
  * so in-place mutation of the preparation arrays is honored. The message
  * objects themselves are SHARED with the live session, so pruning replaces
  * array elements with shallow copies and never mutates an original — an

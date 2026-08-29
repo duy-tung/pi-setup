@@ -10,7 +10,7 @@ components retain their own license notices.
 
 | Item | Value |
 |---|---|
-| Pi | `@earendil-works/pi-coding-agent` 0.84.3 |
+| Pi | `@earendil-works/pi-coding-agent` 0.84.4 |
 | Node | 24.15.0, managed by mise |
 | Subagent transport | Native Pi RPC (`--mode rpc`) |
 | Live config | `~/.pi/agent/` |
@@ -107,7 +107,7 @@ after its authority and trust-boundary findings were fixed.
 - fullscreen dark TUI with nvim as the external editor;
 - project-local trust policy: ask;
 - compaction enabled (`reserveTokens: 16384`, `keepRecentTokens: 32000`);
-- cache-miss notices enabled, including Pi 0.84.3 compaction and branch-summary usage notices;
+- cache-miss notices enabled, including Pi 0.84.3+ compaction and branch-summary usage notices;
 - retries enabled, with provider calls allowed up to one hour;
 - installation telemetry disabled.
 
@@ -115,7 +115,7 @@ after its authority and trust-boundary findings were fixed.
 
 | Package | Purpose |
 |---|---|
-| `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3 request hooks, and server-side fallback pricing |
+| `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3+ request hooks, and server-side fallback pricing |
 | `pi-web-search@1.3.1` (patched) | Web search tools; carries `patches/pi-web-search-oauth-system.patch` |
 | `@upstash/context7-pi@0.1.2` | Context7 tools and explicit `/c7-docs`; its redundant package skill is filtered out |
 
@@ -516,5 +516,5 @@ sandboxed parent process.
   SIGKILL can leave a fail-closed lock requiring confirmed manual removal.
 - `paste-image-attach.ts` touches a private TUI paste path and should be checked after Pi
   upgrades.
-- `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.3 internals;
+- `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.4 internals;
   re-audit them after major upgrades.

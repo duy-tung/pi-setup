@@ -3,7 +3,7 @@
 set -euo pipefail
 
 NODE_VERSION="24.15.0"
-PI_VERSION="0.84.3"
+PI_VERSION="0.84.4"
 OAUTH_REWRITE_MODE="technical-safe"
 WEB_SEARCH_PATCH="pi-web-search-oauth-system.patch"
 WEB_SEARCH_PATCH_TARGET="src/api.ts"

@@ -5,7 +5,7 @@ umask 077
 
 NODE_VERSION="24.15.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
-PI_VERSION="0.84.3"
+PI_VERSION="0.84.4"
 OAUTH_COMMIT="1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49"
 OAUTH_REWRITE_MODE="technical-safe"
 WEB_SEARCH_PATCH="pi-web-search-oauth-system.patch"

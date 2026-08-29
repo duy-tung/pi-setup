@@ -35,7 +35,7 @@ Installer sẽ:
 1. pin Node `24.15.0` trong global mise config;
 2. set global `PI_CACHE_RETENTION=long`;
 3. set global `PI_ANTHROPIC_OAUTH_REWRITE_MODE=technical-safe`;
-4. cài exact `@earendil-works/pi-coding-agent@0.84.3`;
+4. cài exact `@earendil-works/pi-coding-agent@0.84.4`;
 5. backup rồi áp dụng sáu resource được quản lý;
 6. cài/reconcile ba package đã pin;
 7. chạy test, tree-rewind backend suite và no-cost offline startup smoke.
@@ -53,7 +53,7 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 | Thành phần | Pin |
 |---|---|
 | Node | `24.15.0` qua mise |
-| Pi | `@earendil-works/pi-coding-agent@0.84.3` |
+| Pi | `@earendil-works/pi-coding-agent@0.84.4` |
 | Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2` |
 | Web search | `npm:pi-web-search@1.3.1` + `patches/pi-web-search-oauth-system.patch` |
 | Context7 | `npm:@upstash/context7-pi@0.1.2`; giữ tools và `/c7-docs`, filter package skill trùng lặp |
