@@ -12,7 +12,7 @@ A subagent is a separate Pi RPC activation with its own durable session and cont
 Use it when:
 
 1. **Read a lot, return a little.** Keep bulk file reads, logs, or documentation out of the parent context.
-2. **A fixed tool profile matters.** `explore` cannot write; `web` cannot read project files.
+2. **A fixed tool profile matters.** `explore` can read and run offline commands but cannot write; `web` cannot read project files.
 3. **Independent work can overlap.** Start a small fan-out together and synthesize the reports.
 
 Do work inline when it is one quick read/search, needs frequent parent context, or is cheaper than a fresh system prompt.
@@ -31,13 +31,13 @@ A background child returns its ID immediately. Its final report arrives automati
 
 ## Profiles
 
-- **`explore`** — `read,grep,find,ls`; local investigation, planning, and review. Inherits the parent model and thinking level.
+- **`explore`** — `read,grep,find,ls,bash`; local investigation, planning, and review. Its Bash is confined to a read-only, offline Seatbelt profile: every write is denied and there is no network, so `git log`/`git diff`, log analysis, and counting all work while nothing can be changed or sent out. Without the macOS sandbox, Bash is dropped from the profile instead of running unconfined. Inherits the parent model and thinking level.
 - **`web`** — web search and library documentation only. Always ignores project resources and context files.
 - **`work`** — explicit local read/write/Bash tools plus library docs. Allowed only when the parent is in a trusted, non-broad workspace. Bash still has host network access.
 
 Every child uses `--no-approve`: project extensions and context files are not loaded, so a project cannot shadow an allowed built-in tool name. Put relevant project rules in the standalone prompt. There is no separate reviewer profile: give `explore` a review brief. There is no nested delegation or conversation-fork profile.
 
-Filesystem and web-search tools do not meet in one child. This reduces accidental data egress but is not process isolation: Pi and global extension code still run with the user's host authority.
+Filesystem access and network access do not meet in one child: `web` has no project files, and `explore` reads files but its Bash has no network. This reduces accidental data egress but is not process isolation: Pi and global extension code still run with the user's host authority.
 
 ## Write a complete prompt
 

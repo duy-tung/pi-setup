@@ -7,6 +7,12 @@
  * deliberately unrestricted. There is no unsandboxed retry: a denial is final
  * for the agent, which reports the exact command for the user to decide on.
  *
+ * A read-only subagent (PI_SUBAGENT_READONLY=1, set by subagent.ts for the
+ * explore profile) gets no writable root and no network at all, so its Bash can
+ * inspect history and run analysis tools without modifying or exfiltrating
+ * anything. That guarantee is the OS profile, so without Seatbelt this Bash
+ * refuses to run rather than degrading into an unconfined shell.
+ *
  * This is Bash confinement, not a sandbox for Pi as a whole. Built-in file
  * tools use permission-gate's trusted canonical-path checks; user Bash and
  * extension-owned effects remain outside this wrapper.
@@ -23,6 +29,7 @@ import {
   confine,
   DENIAL_MARKER,
   PLAN_DENIAL_MARKER,
+  READ_ONLY_CHILD_DENIAL_MARKER,
   RUNNER_MARKER,
   SEATBELT_AVAILABLE,
   writableRoots,
@@ -55,6 +62,8 @@ function scrub(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 const sandboxActive = SEATBELT_AVAILABLE;
+/** Set by subagent.ts for profiles whose Bash must be read-only and offline. */
+const readOnlyChild = process.env.PI_SUBAGENT_READONLY === "1";
 
 function bashSettings(): { shellPath?: string; commandPrefix?: string } {
   try {
@@ -75,9 +84,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     ...template,
     executionMode: "sequential",
-    description: sandboxActive
-      ? `${template.description} Commands run with macOS Bash confinement: writes outside the current workspace and temp areas, writes to protected config, and reads of known credential paths are denied. Other reads and network are unrestricted. Sandbox denials cannot be escalated by the agent.`
-      : `${template.description} The OS Bash sandbox is unavailable; only sensitive environment-variable scrubbing is active.`,
+    description: readOnlyChild
+      ? `${template.description} Commands run read-only under macOS Bash confinement: every write is denied, network is unavailable, and reads of known credential paths are denied. Use it for inspection such as git history, log analysis, and counting. Sandbox denials cannot be escalated by the agent.`
+      : sandboxActive
+        ? `${template.description} Commands run with macOS Bash confinement: writes outside the current workspace and temp areas, writes to protected config, and reads of known credential paths are denied. Other reads and network are unrestricted. Sandbox denials cannot be escalated by the agent.`
+        : `${template.description} The OS Bash sandbox is unavailable; only sensitive environment-variable scrubbing is active.`,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const { command, timeout } = params as { command: string; timeout?: number };
       const cwd = ctx.cwd ?? process.cwd();
@@ -88,12 +99,19 @@ export default function (pi: ExtensionAPI) {
       const effectiveCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 
       if (!sandboxActive) {
+        // A read-only child's guarantee is the OS profile, not the prompt.
+        if (readOnlyChild) {
+          throw new Error(
+            "sandbox-bash: read-only subagent Bash requires the macOS sandbox, which is unavailable here. "
+              + "Report this to the user instead of retrying.",
+          );
+        }
         return base.execute(toolCallId, { command: effectiveCommand, timeout }, signal, onUpdate, ctx);
       }
 
       const canonicalCwd = canonical(cwd);
       const mode = getPermissionMode();
-      const roots = mode === "plan"
+      const roots = readOnlyChild || mode === "plan"
         ? []
         : writableRoots(canonicalCwd).filter(
             (root) => !isUnsafeWorkspaceRoot(canonicalCwd) || root !== canonicalCwd,
@@ -102,6 +120,7 @@ export default function (pi: ExtensionAPI) {
         roots,
         sensitiveReadRules(canonicalCwd),
         protectedWriteRules(canonicalCwd),
+        readOnlyChild,
       );
 
       try {
@@ -118,7 +137,7 @@ export default function (pi: ExtensionAPI) {
           if (kind === "runner") throw new Error(`${error.message}\n\n${RUNNER_MARKER}`);
           if (kind === "denial") {
             throw new Error(
-              `${error.message}\n\n${mode === "plan" ? PLAN_DENIAL_MARKER : DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
+              `${error.message}\n\n${readOnlyChild ? READ_ONLY_CHILD_DENIAL_MARKER : mode === "plan" ? PLAN_DENIAL_MARKER : DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
             );
           }
         }

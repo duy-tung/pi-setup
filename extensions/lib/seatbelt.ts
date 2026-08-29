@@ -4,6 +4,8 @@
  * Ported from DeepSeek Harness (sandbox-local/src/profiles.ts, sandbox/src/roots.ts):
  * allow-default profile with a file-write deny + writable-roots allowlist.
  * Reads, exec, and NETWORK are deliberately unrestricted — file effects only.
+ * The read-only subagent profile is the one exception: it has no writable root
+ * and denies network, so a child that can read the workspace has no egress path.
  *
  * Kept free of package imports so it can be unit-tested with plain node.
  */
@@ -14,6 +16,8 @@ import { tmpdir } from "node:os";
 /** Model-facing markers — one vocabulary for every sandbox outcome. */
 export const DENIAL_MARKER = "[sandbox: file access denied under workspace-write mode]";
 export const PLAN_DENIAL_MARKER = "[sandbox: file access denied under Plan read-only mode]";
+export const READ_ONLY_CHILD_DENIAL_MARKER =
+	"[sandbox: denied under read-only subagent mode — no writes and no network are available here]";
 export const RUNNER_MARKER =
 	"[sandbox: sandbox runner failed — this is a sandbox problem, not a command failure; do not rewrite the command]";
 
@@ -53,11 +57,16 @@ function filter(rule: SeatbeltPathRule): string {
   return `(${rule.kind} ${sbplString(rule.path)})`;
 }
 
-/** Allow-default profile: workspace/temp writes, then explicit sensitive denies. */
+/**
+ * Allow-default profile: workspace/temp writes, then explicit sensitive denies.
+ * `denyNetwork` is for the read-only subagent profile, whose reads are broad and
+ * whose egress must therefore be closed; normal Bash keeps network access.
+ */
 export function buildProfile(
   roots: string[],
   denyReads: SeatbeltPathRule[] = [],
   denyWrites: SeatbeltPathRule[] = [],
+  denyNetwork = false,
 ): string {
   const forms = [
     "(version 1)",
@@ -73,6 +82,9 @@ export function buildProfile(
   }
   if (denyReads.length > 0) {
     forms.push(`(deny file-read* ${denyReads.map(filter).join(" ")})`);
+  }
+  if (denyNetwork) {
+    forms.push("(deny network*)");
   }
   return forms.join("\n");
 }

@@ -373,6 +373,36 @@ test("Seatbelt profile shares canonical roots and adds sensitive/protected denie
   }
 });
 
+test("read-only subagent profile has no writable root and no network", () => {
+  const f = fixture();
+  try {
+    const profile = buildProfile([], sensitiveReadRules(f.work), protectedWriteRules(f.work), true);
+    assert.match(profile, /\(deny file-write\*\)/);
+    assert.match(profile, /\(deny network\*\)/);
+    // /dev/null stays writable; nothing else does.
+    assert.equal(profile.includes("(allow file-write* (subpath"), false);
+
+    const normal = buildProfile(writableRoots(f.work), [], []);
+    assert.equal(normal.includes("(deny network*)"), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("read-only subagent Bash refuses to run unconfined", () => {
+  const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
+  assert.match(source, /readOnlyChild = process\.env\.PI_SUBAGENT_READONLY === "1"/);
+  assert.match(source, /readOnlyChild \|\| mode === "plan"\s*\? \[\]/);
+  // The profile carries the network deny, and no sandbox means no Bash at all.
+  assert.match(source, /protectedWriteRules\(canonicalCwd\),\s*readOnlyChild,/);
+  assert.match(source, /if \(readOnlyChild\) \{\s*throw new Error\(/);
+
+  const stateSource = readFileSync(new URL("../extensions/lib/subagent-state.ts", import.meta.url), "utf8");
+  assert.match(stateSource, /readOnlyBash: true/);
+  const subagentSource = readFileSync(new URL("../extensions/subagent.ts", import.meta.url), "utf8");
+  assert.match(subagentSource, /PI_SUBAGENT_READONLY: SUBAGENT_PROFILES\[record\.profile\]\.readOnlyBash \? "1" : "0"/);
+});
+
 test("sandbox source exposes no unsandboxed escalation path", () => {
   const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
   assert.equal(source.includes("sandbox_permissions"), false);

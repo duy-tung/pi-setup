@@ -266,7 +266,11 @@ cwd override, orphan adoption, nesting, or polling tool.
 
 Every child uses `--no-approve`, so project-controlled extensions and context cannot shadow
 an allowed built-in tool name. The `web` profile additionally uses `--no-context-files` and
-has no filesystem tools. The `work` profile still requires the parent to be in a trusted,
+has no filesystem tools. The `explore` profile has Bash, but `PI_SUBAGENT_READONLY=1` gives it
+a Seatbelt profile with no writable root and `(deny network*)`, so `git log`/`git diff` and
+other inspection work while writes and egress are denied by the OS; where that sandbox is
+unavailable, Bash is dropped from the profile instead of running unconfined. The `work`
+profile still requires the parent to be in a trusted,
 non-broad workspace, but the standalone child prompt must carry the relevant project rules;
 its Bash retains host network access. Manual and Accept edits treat each new/resumed work
 activation as one broad approval scope because an unattended child cannot forward per-edit
@@ -461,8 +465,9 @@ The repository describes behavior. It is not a backup of conversations or secret
 
 This is an **accident-resistant, human-supervised local setup**, not a sandbox for hostile
 repositories or prompt injection. Pi and global extensions run with the user's host
-authority. Bash network access is unrestricted; whole-process isolation is required for
-untrusted or unattended work, as documented by Pi itself.
+authority. Bash network access is unrestricted everywhere except a read-only `explore` child;
+whole-process isolation is required for untrusted or unattended work, as documented by Pi
+itself.
 
 Focused policy tests use Node's built-in runner:
 

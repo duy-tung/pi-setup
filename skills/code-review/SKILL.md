@@ -39,18 +39,20 @@ Read and apply [STANDARDS-RUBRIC.md](./STANDARDS-RUBRIC.md). It contains the sha
 
 ### 4. Start both subagents in parallel
 
-Issue both `subagent` calls in the same assistant message with profile `explore` and `run_in_background: false`. The fixed profile is read-only, so neither child can "helpfully" fix what it finds. Each `prompt` must be self-contained because a fresh child sees none of this conversation. Use a short axis name as `description`.
+Issue both `subagent` calls in the same assistant message with profile `explore` and `run_in_background: false`. The fixed profile is read-only, so neither child can "helpfully" fix what it finds: its Bash runs the diff commands but is denied every write and has no network. Each `prompt` must be self-contained because a fresh child sees none of this conversation. Use a short axis name as `description`.
+
+Because the children are offline, anything from an issue tracker or another remote source must be fetched here and pasted into the prompt.
 
 **Standards sub-agent brief** — include:
 
-- The full diff command and commit list.
+- The full diff command and commit list, and the instruction to run the diff itself with Bash.
 - The exact resolved path to `STANDARDS-RUBRIC.md` beside this skill (normally `~/.pi/agent/skills/code-review/STANDARDS-RUBRIC.md`); tell the child to read it before reviewing instead of copying the rubric into the tool argument.
 - The list of standards-source files you found in step 3.
 - The brief: "Apply the rubric's axes and severity vocabulary. Per relevant file/hunk, report documented-standard violations with the cited rule and baseline smells with the quoted hunk. Distinguish hard violations from judgement calls, skip tooling-enforced rules, and lead with Critical/Important findings. Under 400 words."
 
 **Spec sub-agent brief** — include:
 
-- The diff command and commit list.
+- The diff command and commit list, and the instruction to run the diff itself with Bash.
 - The path or fetched contents of the spec.
 - The brief: "Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
 

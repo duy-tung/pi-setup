@@ -11,6 +11,7 @@ import {
   expectedSubagentArtifactDir,
   foldSubagentRecords,
   sanitizeSubagentReport,
+  subagentTools,
 } from "../extensions/lib/subagent-state.ts";
 import { assistantSnapshotFromRpcEvent } from "../extensions/lib/subagent-rpc.ts";
 
@@ -106,17 +107,18 @@ test("admission atomically rejects same-child resumes, excess fan-out, and two w
 });
 
 test("profile CLI args enforce fixed tools, context, trust, and resume identity", () => {
-  const web = buildSubagentCliArgs(record({ profile: "web", projectTrustedAtCreation: false }));
+  const web = buildSubagentCliArgs(record({ profile: "web", projectTrustedAtCreation: false }), true);
   assert.ok(web.includes("--no-approve"));
   assert.ok(web.includes("--no-context-files"));
   assert.equal(web[web.indexOf("--tools") + 1], SUBAGENT_PROFILES.web.tools.join(","));
   assert.equal(web.includes("bash"), false);
   assert.ok(web.includes("--no-skills"));
 
-  const explore = buildSubagentCliArgs(record({ profile: "explore" }));
+  const explore = buildSubagentCliArgs(record({ profile: "explore" }), true);
   assert.ok(explore.includes("--no-approve"));
+  assert.equal(explore[explore.indexOf("--tools") + 1], "read,grep,find,ls,bash");
 
-  const work = buildSubagentCliArgs(record({ profile: "work" }));
+  const work = buildSubagentCliArgs(record({ profile: "work" }), true);
   assert.ok(work.includes("--no-approve"));
   assert.equal(work.includes("--approve"), false);
   assert.equal(work[work.indexOf("--tools") + 1], SUBAGENT_PROFILES.work.tools.join(","));
@@ -129,6 +131,17 @@ test("profile CLI args enforce fixed tools, context, trust, and resume identity"
     sessionFile,
   ]);
   assert.equal(resumed.includes("--session-id"), false);
+});
+
+test("read-only Bash is offered only when the OS sandbox can enforce it", () => {
+  assert.deepEqual(subagentTools("explore", true), ["read", "grep", "find", "ls", "bash"]);
+  assert.deepEqual(subagentTools("explore", false), ["read", "grep", "find", "ls"]);
+  // Only the read-only profile depends on the sandbox; the others never change.
+  assert.deepEqual(subagentTools("work", false), [...SUBAGENT_PROFILES.work.tools]);
+  assert.deepEqual(subagentTools("web", false), [...SUBAGENT_PROFILES.web.tools]);
+
+  const withoutSandbox = buildSubagentCliArgs(record({ profile: "explore" }), false);
+  assert.equal(withoutSandbox[withoutSandbox.indexOf("--tools") + 1], "read,grep,find,ls");
 });
 
 test("later successful assistant snapshot clears earlier retry error", () => {

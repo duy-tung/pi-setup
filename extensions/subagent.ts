@@ -47,6 +47,7 @@ import {
 } from "./lib/subagent-rpc.ts";
 import {
   SUBAGENT_OUTPUT_LIMIT_BYTES,
+  SUBAGENT_PROFILES,
   SUBAGENT_STATE_TYPE,
   SUBAGENT_STATE_VERSION,
   assertSubagentAdmission,
@@ -547,6 +548,9 @@ export default function (pi: ExtensionAPI) {
         env: {
           PI_SUBAGENT_DEPTH: String(DEPTH + 1),
           PI_SUBAGENT_PARENT_ID: record.parentSessionId,
+          // Always explicit, so a mutation-capable child can never inherit a
+          // stale read-only flag or a read-only child a missing one.
+          PI_SUBAGENT_READONLY: SUBAGENT_PROFILES[record.profile].readOnlyBash ? "1" : "0",
         },
         stderrPath: join(record.artifactDir, `stderr-${record.generation}.log`),
         signal: startupController.signal,
@@ -934,7 +938,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Start independent background subagents together and continue useful work while they run; use foreground only when the next step needs the result.",
       "Give every fresh subagent a complete standalone prompt: it does not see this conversation.",
-      "Use explore for local read-only work, web for online research without project files, and work only for changes in a trusted workspace.",
+      "Use explore for local read-only work including git history and other offline Bash inspection, web for online research without project files, and work only for changes in a trusted workspace.",
     ],
     parameters: Type.Object({
       description: Type.String({ description: "Short 3-5 word display label" }),
