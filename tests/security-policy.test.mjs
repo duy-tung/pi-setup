@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpath
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import permissionGate from "../extensions/permission-gate.ts";
+import permissionGate, { clampForDialog } from "../extensions/permission-gate.ts";
 import {
   isUnder,
   protectedWrite,
@@ -386,6 +386,66 @@ test("read-only subagent profile has no writable root and no network", () => {
     assert.equal(normal.includes("(deny network*)"), false);
   } finally {
     f.cleanup();
+  }
+});
+
+test("a dialog operation is clamped in both directions and keeps each line's ends", () => {
+  const short = clampForDialog("git status", 80, 24);
+  assert.equal(short, "git status");
+
+  const wide = clampForDialog(`git commit -m "${"x".repeat(400)}END"`, 80, 24);
+  assert.equal(wide.includes("\n"), false);
+  assert.ok(wide.length <= 76, `clamped line stayed ${wide.length} columns wide`);
+  assert.match(wide, /^git commit/);
+  assert.match(wide, /END"$/);
+  assert.match(wide, /…/);
+
+  const tall = clampForDialog(Array.from({ length: 40 }, (_, i) => `line-${i}`).join("\n"), 80, 24);
+  const lines = tall.split("\n");
+  assert.ok(lines.length <= 12, `clamped block kept ${lines.length} lines`);
+  assert.equal(lines[0], "line-0");
+  assert.equal(lines.at(-1), "line-39");
+  assert.match(tall, /… \d+ more lines …/);
+
+  // A short terminal gets a smaller budget, never a bigger one.
+  assert.ok(clampForDialog("a\nb\nc\nd\ne\nf\ng\nh", 80, 18).split("\n").length <= 6);
+});
+
+test("a long ask-tier command prompts with a bounded dialog and an unbounded policy view", async () => {
+  const f = fixture();
+  try {
+    const handler = captureHandler("auto");
+    const body = Array.from({ length: 40 }, (_, i) => `body line ${i}`).join("\n");
+    const ctx = context(f.work, false);
+    const denied = await handler(
+      { toolName: "bash", input: { command: `git commit -F - <<'EOF'\n${body}\nEOF` } },
+      ctx.value,
+    );
+
+    const prompt = ctx.calls.at(-1);
+    assert.equal(prompt.kind, "select");
+    const lines = prompt.message.split("\n");
+    assert.ok(lines.length <= 20, `dialog asked for ${lines.length} rows`);
+    for (const line of lines) assert.ok(line.length <= 76, `dialog line ran to ${line.length} columns`);
+    assert.match(prompt.message, /… \d+ more lines …/);
+    assert.equal(denied.block, true);
+
+    // Clamping is display-only: a credential path in the truncated middle is
+    // still matched, and it is denied before any dialog is shown.
+    const beforePrompt = ctx.calls.length;
+    const credential = await handler(
+      {
+        toolName: "bash",
+        input: { command: `${body}\ncat ${join(homedir(), ".aws", "credentials")}\n${body}` },
+      },
+      ctx.value,
+    );
+    assert.equal(credential.block, true);
+    assert.match(credential.reason, /Credential access is blocked/);
+    assert.equal(ctx.calls.length, beforePrompt, "a hard deny must not open a dialog");
+  } finally {
+    f.cleanup();
+    resetPermissionRuntime();
   }
 });
 

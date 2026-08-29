@@ -11,6 +11,11 @@
  * the same question came back on every call — measured over this machine's
  * session history that was 394 of 400 write/edit calls, because a session
  * started in $HOME made every write look like a boundary crossing.
+ *
+ * Every prompt shows a clamped copy of the operation, because Pi renders an
+ * extension dialog as an unscrolled Text. Clamping is display-only: rule
+ * matching, path resolution, and the model-facing block message all use the
+ * complete command.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -35,6 +40,49 @@ import { dirname, join } from "node:path";
 const IS_SUBAGENT = Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "write", "edit"]);
 const MUTATING_TOOLS = new Set(["write", "edit"]);
+const ELLIPSIS = " … ";
+const MIN_DIALOG_COLUMNS = 40;
+const MAX_DETAIL_LINES = 12;
+const MIN_DETAIL_LINES = 4;
+/** Rows a dialog spends on its frame, title, labels, choices, and key hints. */
+const DIALOG_CHROME_ROWS = 12;
+
+function detailLineBudget(rows: number): number {
+  return Math.max(MIN_DETAIL_LINES, Math.min(MAX_DETAIL_LINES, rows - DIALOG_CHROME_ROWS));
+}
+
+function clampLine(line: string, width: number): string {
+  if (line.length <= width) return line;
+  // Both ends carry meaning: a command starts with its program and often ends
+  // with the target or redirection that decides whether to allow it.
+  const room = width - ELLIPSIS.length;
+  const head = Math.ceil(room / 2);
+  return `${line.slice(0, head)}${ELLIPSIS}${line.slice(line.length - (room - head))}`;
+}
+
+/**
+ * Bound one operation for a dialog. Pi renders an extension dialog title as a
+ * plain Text with no row budget and no scrolling, so an unbounded operation —
+ * a heredoc commit message, a long delete list — pushes the transcript off
+ * screen. Only the displayed copy is clamped: the model and the rule decision
+ * still see the exact command.
+ */
+export function clampForDialog(
+  text: string,
+  columns = process.stdout.columns ?? 80,
+  rows = process.stdout.rows ?? 24,
+): string {
+  const width = Math.max(MIN_DIALOG_COLUMNS, columns - 4);
+  const budget = detailLineBudget(rows);
+  const lines = text.split("\n");
+  if (lines.length > budget) {
+    const tail = Math.min(3, budget - 2);
+    const head = budget - tail - 1;
+    const omitted = lines.length - head - tail;
+    lines.splice(head, omitted, `… ${omitted} more line${omitted === 1 ? "" : "s"} …`);
+  }
+  return lines.map((line) => clampLine(line, width)).join("\n");
+}
 
 function blocked(reason: string) {
   return { block: true as const, reason };
@@ -85,7 +133,7 @@ async function askOnce(
   const options = always ? [once, always, deny] : [once, deny];
   // select() carries no message field, so the operation travels in the title.
   const choice = await ctx.ui.select(
-    `permission-gate: ${what}\n\nWorking directory:\n${cwd}\n\nOperation:\n${detail}`,
+    `permission-gate: ${what}\n\nWorking directory:\n${clampForDialog(cwd)}\n\nOperation:\n${clampForDialog(detail)}`,
     options,
   );
 
@@ -108,7 +156,7 @@ async function confirmEveryTime(ctx: any, what: string, detail: string, cwd: str
   }
   const approved = await ctx.ui.confirm(
     `permission-gate: ${what}`,
-    `Working directory:\n${cwd}\n\nOperation:\n${detail}\n\nAllow this operation once?`,
+    `Working directory:\n${clampForDialog(cwd)}\n\nOperation:\n${clampForDialog(detail)}\n\nAllow this operation once?`,
   );
   return approved
     ? undefined

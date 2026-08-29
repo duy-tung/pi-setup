@@ -234,6 +234,11 @@ Code does not:
 - **`rm -rf` asks rather than being denied.** The same two layers make a confined,
   checkpointed delete recoverable.
 
+Every prompt shows a clamped copy of the operation — bounded by terminal rows and columns,
+keeping both ends of each line — because Pi renders an extension dialog as an unscrolled Text,
+so a heredoc commit message would otherwise push the transcript off screen. Rule matching,
+path resolution, and the model-facing message still use the complete command.
+
 Auto treats the session's working directory as the workspace and does not re-ask inside it,
 as Claude Code does. Protected writes (`~/.zshrc`, `~/.gitconfig`, `~/.pi/agent`, project
 `.git/config` and hooks) and sensitive paths keep their own prompt and hard block
