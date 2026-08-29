@@ -38,6 +38,7 @@ import {
   rememberPermissionSubagent,
 } from "./lib/permission-mode.ts";
 import { resolvePiInvocation } from "./lib/pi-invocation.ts";
+import { SEATBELT_AVAILABLE } from "./lib/seatbelt.ts";
 import {
   ManagedRpcChild,
   RpcProcessExitError,
@@ -56,7 +57,9 @@ import {
   foldSubagentRecords,
   sanitizeSubagentReport,
   subagentRecordPathsAreValid,
+  subagentTools,
   truncateUtf8,
+  unavailableProfileTools,
   type CatalogDiagnostic,
   type SubagentProfile,
   type SubagentRecord,
@@ -243,6 +246,8 @@ export default function (pi: ExtensionAPI) {
   const starting = new Map<string, SubagentProfile>();
   const startupLifecycles = new Map<string, StartingLifecycle>();
   const controlTails = new Map<string, Promise<void>>();
+  /** Profiles already reported as short of tools, so the notice appears once. */
+  const reportedToolGaps = new Set<SubagentProfile>();
   let ownerSessionId: string | undefined;
   let uiCtx: ExtensionContext | undefined;
   let shuttingDown = false;
@@ -460,6 +465,31 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  /**
+   * A profile names tools by string, so removing a package silently shrinks a
+   * child instead of failing anywhere visible. Refuse the empty case, and
+   * report a partial one once rather than letting the child discover it.
+   */
+  function assertProfileToolsAvailable(profile: SubagentProfile, ctx: ExtensionContext): void {
+    // A diagnostic, not a gate: a host without the registry keeps delegating.
+    if (typeof pi.getAllTools !== "function") return;
+    const wanted = subagentTools(profile, SEATBELT_AVAILABLE);
+    const missing = unavailableProfileTools(wanted, pi.getAllTools().map((tool) => tool.name));
+    if (missing.length === 0) return;
+    if (missing.length === wanted.length) {
+      throw new Error(
+        `The ${profile} profile has no installed tool left (${missing.join(", ")}); `
+          + "restore its packages before delegating.",
+      );
+    }
+    if (reportedToolGaps.has(profile)) return;
+    reportedToolGaps.add(profile);
+    ctx.ui?.notify?.(
+      `subagent: the ${profile} profile is missing ${missing.join(", ")}; the child starts without them`,
+      "warning",
+    );
+  }
+
   async function startActivation(
     base: SubagentRecord,
     prompt: string,
@@ -473,6 +503,7 @@ export default function (pi: ExtensionAPI) {
       throw new Error("Work subagents cannot start or resume while Plan mode is active.");
     }
     if (base.parentSessionId !== currentSessionId(ctx)) throw new Error("Subagent does not belong to this parent session.");
+    assertProfileToolsAvailable(base.profile, ctx);
     const expectedArtifactDir = expectedSubagentArtifactDir(base.parentSessionId, base.id);
     if (!subagentRecordPathsAreValid(base)) {
       throw new Error("Subagent artifact or session identity is outside its parent-scoped private directory.");

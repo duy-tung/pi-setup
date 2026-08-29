@@ -4,12 +4,16 @@ export type PermissionSubagentProfile = "explore" | "web" | "work";
 
 export const DEFAULT_PERMISSION_MODE = "auto" satisfies PermissionMode;
 
+/**
+ * Tools that never need a gate. Every name here is a standing pre-approval, so
+ * it must name a tool that exists and has been reviewed; a name for a tool
+ * nobody has seen yet would approve whatever later claims it.
+ */
 const NO_APPROVAL_TOOLS = new Set([
   "read",
   "grep",
   "find",
   "ls",
-  "read_image",
   "ask_user",
   "web_search",
   "resolve-library-id",

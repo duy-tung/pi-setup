@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -387,6 +387,31 @@ test("read-only subagent profile has no writable root and no network", () => {
   } finally {
     f.cleanup();
   }
+});
+
+test("every no-approval tool name belongs to a tool this setup installs", () => {
+  const source = readFileSync(new URL("../extensions/lib/permission-mode.ts", import.meta.url), "utf8");
+  const block = source.slice(
+    source.indexOf("const NO_APPROVAL_TOOLS"),
+    source.indexOf("const PLAN_DISABLED_TOOLS"),
+  );
+  const names = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(names.length > 0);
+
+  const builtin = new Set(["read", "grep", "find", "ls", "bash", "edit", "write"]);
+  // Contributed by the pinned packages in settings.json.
+  const fromPackages = new Set(["web_search", "resolve-library-id", "query-docs"]);
+  const extensionDir = new URL("../extensions/", import.meta.url);
+  const registered = new Set();
+  for (const file of readdirSync(extensionDir).filter((name) => name.endsWith(".ts"))) {
+    const text = readFileSync(new URL(file, extensionDir), "utf8");
+    for (const match of text.matchAll(/name: "([a-z_0-9-]+)"/g)) registered.add(match[1]);
+  }
+
+  // A pre-approval for a tool nobody installs would silently cover whatever
+  // later claims that name.
+  const unknown = names.filter((name) => !builtin.has(name) && !fromPackages.has(name) && !registered.has(name));
+  assert.deepEqual(unknown, []);
 });
 
 test("read-only subagent Bash refuses to run unconfined", () => {

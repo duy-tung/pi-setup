@@ -296,6 +296,23 @@ export function subagentTools(profile: SubagentProfile, sandboxAvailable: boolea
     : [...spec.tools];
 }
 
+/**
+ * Profile tools this Pi installation does not provide. A package can be removed
+ * without anyone editing a profile, and the child would then quietly start with
+ * fewer tools than its brief assumes — or, for `web`, with none at all.
+ *
+ * Only the missing direction is sound: the child skips project-controlled
+ * extensions the parent may have loaded, so a name present here can still be
+ * absent in the child.
+ */
+export function unavailableProfileTools(
+  tools: readonly string[],
+  installedTools: readonly string[],
+): string[] {
+  const installed = new Set(installedTools);
+  return tools.filter((tool) => !installed.has(tool));
+}
+
 export function buildSubagentCliArgs(
   record: SubagentRecord,
   sandboxAvailable: boolean = SEATBELT_AVAILABLE,

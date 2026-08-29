@@ -275,7 +275,9 @@ non-broad workspace, but the standalone child prompt must carry the relevant pro
 its Bash retains host network access. Manual and Accept edits treat each new/resumed work
 activation as one broad approval scope because an unattended child cannot forward per-edit
 prompts. Plan blocks those activations, and no parent mode is passed into the child. These are
-model-tool restrictions and accident resistance, not process isolation. RPC dialogs fail closed, reports are
+model-tool restrictions and accident resistance, not process isolation. Because a profile names
+its tools as strings, an uninstalled package would silently shrink a child: a partial gap is
+reported once per session and a profile with nothing installed refuses to start. RPC dialogs fail closed, reports are
 redacted/marked/capped before entering parent context, and active children stop on every
 parent session shutdown.
 

@@ -12,6 +12,7 @@ import {
   foldSubagentRecords,
   sanitizeSubagentReport,
   subagentTools,
+  unavailableProfileTools,
 } from "../extensions/lib/subagent-state.ts";
 import { assistantSnapshotFromRpcEvent } from "../extensions/lib/subagent-rpc.ts";
 
@@ -142,6 +143,22 @@ test("read-only Bash is offered only when the OS sandbox can enforce it", () => 
 
   const withoutSandbox = buildSubagentCliArgs(record({ profile: "explore" }), false);
   assert.equal(withoutSandbox[withoutSandbox.indexOf("--tools") + 1], "read,grep,find,ls");
+});
+
+test("a profile tool the installation lacks is reported, not silently dropped", () => {
+  const installed = ["read", "grep", "find", "ls", "bash"];
+  assert.deepEqual(unavailableProfileTools(SUBAGENT_PROFILES.explore.tools, installed), []);
+  // Removing the docs package leaves work short of two tools and web of all three.
+  assert.deepEqual(unavailableProfileTools(SUBAGENT_PROFILES.work.tools, installed), [
+    "edit",
+    "write",
+    "resolve-library-id",
+    "query-docs",
+  ]);
+  assert.deepEqual(
+    unavailableProfileTools(SUBAGENT_PROFILES.web.tools, installed),
+    [...SUBAGENT_PROFILES.web.tools],
+  );
 });
 
 test("later successful assistant snapshot clears earlier retry error", () => {

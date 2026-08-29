@@ -48,7 +48,8 @@ function within(promise, ms = 5_000) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function harness() {
+/** `missingTools` simulates a package that is no longer installed. */
+function harness({ missingTools = [] } = {}) {
   resetPermissionRuntime();
   const handlers = new Map();
   const tools = new Map();
@@ -63,6 +64,22 @@ function harness() {
     },
     registerTool(tool) {
       tools.set(tool.name, tool);
+    },
+    getAllTools() {
+      const installed = [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write",
+        "web_search",
+        "resolve-library-id",
+        "query-docs",
+        ...tools.keys(),
+      ];
+      return installed.filter((name) => !missingTools.includes(name)).map((name) => ({ name }));
     },
     registerCommand() {},
     appendEntry(customType, data) {
@@ -192,6 +209,40 @@ test("real work-child startup, interrupt, abort, and shutdown own the mode lock"
     if (previousNoSession === undefined) delete process.env.FAKE_RPC_NO_SESSION;
     else process.env.FAKE_RPC_NO_SESSION = previousNoSession;
   }
+});
+
+test("a profile whose tools are all uninstalled refuses instead of starting a useless child", async () => {
+  const h = harness({ missingTools: ["web_search", "resolve-library-id", "query-docs"] });
+  await h.emit("session_start", { reason: "startup" });
+  const result = await within(h.tools.get("subagent").execute(
+    "no-tools",
+    { description: "web research", prompt: "look it up", profile: "web", run_in_background: true },
+    undefined,
+    undefined,
+    h.ctx,
+  ));
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /no installed tool left/);
+  assert.equal(h.notices.some((notice) => notice.type === "warning"), false);
+});
+
+test("a partly uninstalled profile warns once and still delegates", async () => {
+  const h = harness({ missingTools: ["query-docs"] });
+  await h.emit("session_start", { reason: "startup" });
+  // The gap is reported before any child process is started, so a failed spawn
+  // in this harness does not hide the notice.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await within(h.tools.get("subagent").execute(
+      `partial-${attempt}`,
+      { description: "trusted change", prompt: "edit", profile: "work", run_in_background: true },
+      undefined,
+      undefined,
+      h.ctx,
+    ));
+  }
+  const warnings = h.notices.filter((notice) => notice.type === "warning" && notice.message.includes("query-docs"));
+  assert.equal(warnings.length, 1, "the same gap must be reported once per session");
+  assert.match(warnings[0].message, /work profile is missing query-docs/);
 });
 
 test.after(() => {
