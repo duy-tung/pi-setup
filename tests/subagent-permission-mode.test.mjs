@@ -36,6 +36,10 @@ const {
   permissionSubagentProfile,
   resetPermissionRuntime,
 } = await import("../extensions/lib/permission-mode.ts");
+const {
+  expectedSubagentArtifactDir,
+  subagentScratchDir,
+} = await import("../extensions/lib/subagent-state.ts");
 
 function within(promise, ms = 5_000) {
   let timer;
@@ -243,6 +247,41 @@ test("a partly uninstalled profile warns once and still delegates", async () => 
   const warnings = h.notices.filter((notice) => notice.type === "warning" && notice.message.includes("query-docs"));
   assert.equal(warnings.length, 1, "the same gap must be reported once per session");
   assert.match(warnings[0].message, /work profile is missing query-docs/);
+});
+
+test("explore scratch is created for the child and removed when the parent session ends", async () => {
+  const fakeChild = fileURLToPath(new URL("./fixtures/fake-rpc-child.mjs", import.meta.url));
+  const previousArgv1 = process.argv[1];
+  const previousMode = process.env.FAKE_RPC_MODE;
+  const previousNoSession = process.env.FAKE_RPC_NO_SESSION;
+  process.argv[1] = fakeChild;
+  process.env.FAKE_RPC_MODE = "normal";
+  process.env.FAKE_RPC_NO_SESSION = "1";
+
+  try {
+    const h = harness();
+    await h.emit("session_start", { reason: "startup" });
+    const started = await within(h.tools.get("subagent").execute(
+      "scratch-child",
+      { description: "inspect logs", prompt: "count", profile: "explore", run_in_background: true },
+      undefined,
+      undefined,
+      h.ctx,
+    ));
+    const artifactDir = expectedSubagentArtifactDir("parent-session", started.details.id);
+    const scratch = subagentScratchDir(artifactDir);
+    assert.equal(existsSync(scratch), true, "a read-only child needs its writable directory up front");
+
+    await within(h.emit("session_shutdown", { reason: "quit" }));
+    assert.equal(existsSync(scratch), false, "scratch belongs to the session that created it");
+    assert.equal(existsSync(join(artifactDir, "sessions")), true, "the transcript beside it must survive");
+  } finally {
+    process.argv[1] = previousArgv1;
+    if (previousMode === undefined) delete process.env.FAKE_RPC_MODE;
+    else process.env.FAKE_RPC_MODE = previousMode;
+    if (previousNoSession === undefined) delete process.env.FAKE_RPC_NO_SESSION;
+    else process.env.FAKE_RPC_NO_SESSION = previousNoSession;
+  }
 });
 
 test.after(() => {

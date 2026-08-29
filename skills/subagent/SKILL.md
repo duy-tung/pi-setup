@@ -31,7 +31,7 @@ A background child returns its ID immediately. Its final report arrives automati
 
 ## Profiles
 
-- **`explore`** — `read,grep,find,ls,bash`; local investigation, planning, and review. Its Bash is confined to a read-only, offline Seatbelt profile: every write is denied and there is no network, so `git log`/`git diff`, log analysis, and counting all work while nothing can be changed or sent out. Without the macOS sandbox, Bash is dropped from the profile instead of running unconfined. Inherits the parent model and thinking level.
+- **`explore`** — `read,grep,find,ls,bash`; local investigation, planning, and review. Its Bash is confined to a read-only, offline Seatbelt profile: there is no network, and the only writable path is the child's own `$PI_SUBAGENT_SCRATCH`, so `git log`/`git diff`, log analysis, and counting all work while the workspace cannot change. Use scratch when a result is larger than a report or a pipeline needs an intermediate file: tell the child to name the files it leaves, then read them by path. That directory is deleted when this session ends, and its contents reach your context unfiltered, unlike a report. Without the macOS sandbox, Bash is dropped from the profile instead of running unconfined. Inherits the parent model and thinking level.
 - **`web`** — web search and library documentation only. Always ignores project resources and context files.
 - **`work`** — explicit local read/write/Bash tools plus library docs. Allowed only when the parent is in a trusted, non-broad workspace. Bash still has host network access.
 

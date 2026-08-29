@@ -272,9 +272,13 @@ cwd override, orphan adoption, nesting, or polling tool.
 Every child uses `--no-approve`, so project-controlled extensions and context cannot shadow
 an allowed built-in tool name. The `web` profile additionally uses `--no-context-files` and
 has no filesystem tools. The `explore` profile has Bash, but `PI_SUBAGENT_READONLY=1` gives it
-a Seatbelt profile with no writable root and `(deny network*)`, so `git log`/`git diff` and
-other inspection work while writes and egress are denied by the OS; where that sandbox is
-unavailable, Bash is dropped from the profile instead of running unconfined. The `work`
+a Seatbelt profile with `(deny network*)` whose only writable root is the child's own
+`scratch/` directory, so `git log`/`git diff` and other inspection work while the workspace and
+egress are denied by the OS; where that sandbox is unavailable, Bash is dropped from the
+profile instead of running unconfined. Scratch is how a child returns more than its 16KB
+report: the parent reads those files by path, which is the one child output that reaches
+parent context without redaction and marking. It is deleted when the parent session ends, and
+anything a crashed session left is swept after seven days. The `work`
 profile still requires the parent to be in a trusted,
 non-broad workspace, but the standalone child prompt must carry the relevant project rules;
 its Bash retains host network access. Manual and Accept edits treat each new/resumed work

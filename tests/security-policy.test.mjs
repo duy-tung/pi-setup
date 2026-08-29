@@ -477,7 +477,11 @@ test("every no-approval tool name belongs to a tool this setup installs", () => 
 test("read-only subagent Bash refuses to run unconfined", () => {
   const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
   assert.match(source, /readOnlyChild = process\.env\.PI_SUBAGENT_READONLY === "1"/);
-  assert.match(source, /readOnlyChild \|\| mode === "plan"\s*\? \[\]/);
+  // Its only writable root is its own scratch directory, and only inside the
+  // parent-scoped artifact tree.
+  assert.match(source, /readOnlyChild\s*\? scratchRoot\(\)/);
+  assert.match(source, /isUnder\(scratch, root\) && existsSync\(scratch\)/);
+  assert.match(source, /mode === "plan"\s*\? \[\]/);
   // The profile carries the network deny, and no sandbox means no Bash at all.
   assert.match(source, /protectedWriteRules\(canonicalCwd\),\s*readOnlyChild,/);
   assert.match(source, /if \(readOnlyChild\) \{\s*throw new Error\(/);

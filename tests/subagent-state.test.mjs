@@ -10,7 +10,10 @@ import {
   buildSubagentCliArgs,
   expectedSubagentArtifactDir,
   foldSubagentRecords,
+  SCRATCH_MAX_AGE_MS,
   sanitizeSubagentReport,
+  staleScratchDirs,
+  subagentScratchDir,
   subagentTools,
   unavailableProfileTools,
 } from "../extensions/lib/subagent-state.ts";
@@ -143,6 +146,26 @@ test("read-only Bash is offered only when the OS sandbox can enforce it", () => 
 
   const withoutSandbox = buildSubagentCliArgs(record({ profile: "explore" }), false);
   assert.equal(withoutSandbox[withoutSandbox.indexOf("--tools") + 1], "read,grep,find,ls");
+});
+
+test("scratch lives beside the transcript and only the read-only profile has one", () => {
+  const artifactDir = expectedSubagentArtifactDir("parent-1", "child-1");
+  assert.equal(subagentScratchDir(artifactDir), join(artifactDir, "scratch"));
+  assert.equal(SUBAGENT_PROFILES.explore.scratch, true);
+  assert.equal(SUBAGENT_PROFILES.work.scratch, false);
+  assert.equal(SUBAGENT_PROFILES.web.scratch, false);
+  // The child is told where to write and that the directory does not survive.
+  assert.match(SUBAGENT_PROFILES.explore.brief, /\$PI_SUBAGENT_SCRATCH/);
+  assert.match(SUBAGENT_PROFILES.explore.brief, /deleted when the parent session ends/);
+});
+
+test("only scratch past the retention window is swept", () => {
+  const now = 1_000_000_000_000;
+  const fresh = { path: "/a/scratch", mtimeMs: now - 1000 };
+  const aging = { path: "/b/scratch", mtimeMs: now - SCRATCH_MAX_AGE_MS + 1000 };
+  const abandoned = { path: "/c/scratch", mtimeMs: now - SCRATCH_MAX_AGE_MS - 1000 };
+  assert.deepEqual(staleScratchDirs([fresh, aging, abandoned], now), ["/c/scratch"]);
+  assert.deepEqual(staleScratchDirs([], now), []);
 });
 
 test("a profile tool the installation lacks is reported, not silently dropped", () => {

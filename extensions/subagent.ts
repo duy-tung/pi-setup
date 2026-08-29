@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -55,8 +56,11 @@ import {
   buildSubagentCliArgs,
   expectedSubagentArtifactDir,
   foldSubagentRecords,
+  SCRATCH_DIR_NAME,
   sanitizeSubagentReport,
+  staleScratchDirs,
   subagentRecordPathsAreValid,
+  subagentScratchDir,
   subagentTools,
   truncateUtf8,
   unavailableProfileTools,
@@ -490,6 +494,40 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  function discardScratch(paths: readonly string[]): void {
+    for (const path of paths) {
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {
+        // Leftover scratch is inert; the next sweep tries again.
+      }
+    }
+  }
+
+  /** Scratch left by a session that never shut down cleanly. */
+  function sweepAbandonedScratch(): void {
+    const root = join(homedir(), ".pi", "agent", "subagents");
+    const candidates: { path: string; mtimeMs: number }[] = [];
+    try {
+      for (const parent of readdirSync(root, { withFileTypes: true })) {
+        if (!parent.isDirectory()) continue;
+        for (const child of readdirSync(join(root, parent.name), { withFileTypes: true })) {
+          if (!child.isDirectory()) continue;
+          const path = join(root, parent.name, child.name, SCRATCH_DIR_NAME);
+          try {
+            candidates.push({ path, mtimeMs: statSync(path).mtimeMs });
+          } catch {
+            // No scratch directory for this child.
+          }
+        }
+      }
+    } catch {
+      // No subagent artifacts yet.
+      return;
+    }
+    discardScratch(staleScratchDirs(candidates, Date.now()));
+  }
+
   async function startActivation(
     base: SubagentRecord,
     prompt: string,
@@ -570,6 +608,7 @@ export default function (pi: ExtensionAPI) {
       ensurePrivateDir(join(homedir(), ".pi", "agent", "subagents", base.parentSessionId));
       ensurePrivateDir(base.artifactDir);
       ensurePrivateDir(join(base.artifactDir, "sessions"));
+      if (SUBAGENT_PROFILES[base.profile].scratch) ensurePrivateDir(subagentScratchDir(base.artifactDir));
       const invocation = resolvePiInvocation();
       const args = [...invocation.args, ...buildSubagentCliArgs(record)];
       rpc = await ManagedRpcChild.start({
@@ -582,6 +621,9 @@ export default function (pi: ExtensionAPI) {
           // Always explicit, so a mutation-capable child can never inherit a
           // stale read-only flag or a read-only child a missing one.
           PI_SUBAGENT_READONLY: SUBAGENT_PROFILES[record.profile].readOnlyBash ? "1" : "0",
+          PI_SUBAGENT_SCRATCH: SUBAGENT_PROFILES[record.profile].scratch
+            ? subagentScratchDir(record.artifactDir)
+            : "",
         },
         stderrPath: join(record.artifactDir, `stderr-${record.generation}.log`),
         signal: startupController.signal,
@@ -908,6 +950,7 @@ export default function (pi: ExtensionAPI) {
       rememberPermissionSubagent(id, record.profile);
     }
     diagnostics.push(...folded.diagnostics);
+    sweepAbandonedScratch();
 
     for (const record of [...records.values()]) {
       if (record.status !== "running") continue;
@@ -955,6 +998,8 @@ export default function (pi: ExtensionAPI) {
       await child.rpc.dispose();
       await child.finalizePromise;
     }));
+    // Scratch belongs to this parent session; the transcripts beside it stay.
+    discardScratch([...records.values()].map((record) => subagentScratchDir(record.artifactDir)));
     uiCtx?.ui?.setWidget?.("subagents", undefined);
     uiCtx = undefined;
   });
