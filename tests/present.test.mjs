@@ -444,6 +444,93 @@ test("wrong child model and mutated protected content fail open", async (t) => {
   });
 });
 
+test("every silent exit is named, counted, and reported by /present status", async (t) => {
+  await t.test("a rejected literal names what was lost", async () => {
+    const source = sourceEntry("literal", `${longText()} Use \`pi --version\` at /tmp/pi-setup with v0.84.3.`);
+    const h = harness({ source });
+    await enable(h);
+    await h.emit("agent_settled");
+    const child = await waitForPrompt(h);
+    child.complete(source.message.content[0].text.replace("v0.84.3", "v0.84.4"));
+    await h.controller.waitForIdle();
+
+    assert.equal(h.entries.length, 0);
+    const { counts, recent } = h.controller.observations();
+    assert.equal(counts["literals-changed"], 1);
+    // The diagnostic that would have made the validator's own defect visible.
+    assert.match(recent.at(-1).detail, /lost: .*v0\.84\.3/);
+    assert.match(recent.at(-1).detail, /invented: .*v0\.84\.4/);
+  });
+
+  await t.test("an unterminated fence is named apart from a short answer", async () => {
+    const h = harness({ source: sourceEntry("unclosed", `${longText()}\n\`\`\`ts\nunclosed`) });
+    await enable(h);
+    await h.emit("agent_settled");
+    await h.controller.waitForIdle();
+    assert.equal(h.starts.length, 0, "an unrewritable source must not spawn a child");
+    const { counts, recent } = h.controller.observations();
+    assert.equal(counts["source-too-short"], 1);
+    assert.equal(recent.at(-1).detail, "unterminated fenced block");
+  });
+
+  await t.test("a wrong child model reports the model it actually got", async () => {
+    const h = harness({ childState: { model: { provider: "openai-codex", id: "wrong" } } });
+    await enable(h);
+    await h.emit("agent_settled");
+    for (let attempt = 0; attempt < 10 && h.children.length === 0; attempt++) await flush();
+    await h.controller.waitForIdle();
+    const { counts, recent } = h.controller.observations();
+    assert.equal(counts["child-invalid"], 1);
+    assert.match(recent.at(-1).detail, /openai-codex\/wrong/);
+  });
+
+  await t.test("a successful rewrite is counted too", async () => {
+    const h = harness();
+    await enable(h);
+    await h.emit("agent_settled");
+    const child = await waitForPrompt(h);
+    child.complete(longText());
+    await h.controller.waitForIdle();
+    assert.equal(h.entries.length, 1);
+    assert.equal(h.controller.observations().counts.ok, 1);
+  });
+
+  await t.test("status reports the tally and stays quiet before anything happens", async () => {
+    const h = harness();
+    await enable(h);
+    await h.commands.get("present").handler("status", h.ctx);
+    assert.match(h.notices.at(-1).message, /no answers handled yet/);
+
+    await h.emit("agent_settled");
+    const child = await waitForPrompt(h);
+    child.complete(longText());
+    await h.controller.waitForIdle();
+    await h.commands.get("present").handler("status", h.ctx);
+    assert.match(h.notices.at(-1).message, /1 handled/);
+    assert.match(h.notices.at(-1).message, /ok 1/);
+  });
+});
+
+test("observation detail is redacted and bounded", async () => {
+  const h = harness();
+  await enable(h);
+  await h.emit("agent_settled");
+  const child = await waitForPrompt(h);
+  // Child stderr and rewrite fragments reach this text, and it goes on screen.
+  child.complete(longText(" tail"), {
+    stopReason: "error",
+    errorMessage: `boom sk-ant-api03-${"a".repeat(40)} ${"x".repeat(500)}`,
+  });
+  await h.controller.waitForIdle();
+
+  const { counts, recent } = h.controller.observations();
+  assert.equal(counts["child-error"], 1);
+  const detail = recent.at(-1).detail;
+  assert.doesNotMatch(detail, /sk-ant-api03-a{20}/);
+  assert.match(detail, /REDACTED:ANTHROPIC_API_KEY/);
+  assert.ok(detail.length <= 200, `detail not bounded: ${detail.length}`);
+});
+
 test("child errors and oversized rewrites fail open and clean up", async (t) => {
   await t.test("child error", async () => {
     const h = harness();

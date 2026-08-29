@@ -282,6 +282,15 @@ loại quan sát được, trên các rewrite không mất gì cả. Thinking le
 vào `PRESENT_MODEL` chứ không viết lặp — `low` pass đúng 4/6 như `off` với cùng latency, còn
 lệch giữa tham số spawn và ownership check thì mọi rewrite fail im lặng.
 
+Vì pipeline fail-open, trước đây mọi lối thoát không ra rewrite đều là `return` trần — present
+không ra gì trông y hệt present đang tắt. Chính sự mù đó khiến một validator hỏng nằm im trong
+khi người ta đi chỉnh các núm nhìn thấy được. Giờ mỗi lối thoát đều có tên, được đếm, và đọc
+bằng `/present status`: `source-unsettled`, `source-too-short` (báo riêng ca fence chưa đóng,
+vì ca đó không bao giờ validate được), `source-too-large`, `superseded`, `child-invalid`,
+`child-error`, `result-empty`, `result-too-large`, `fences-changed`, `literals-changed` (nêu
+rõ literal nào bị mất hoặc bị bịa), `failed`, và `ok`. Số đếm chỉ sống trong session, không ghi
+ra đĩa, và phần detail đi qua bộ redact credential dùng chung trước khi lên màn hình.
+
 ## 6. Anthropic cache
 
 Với `PI_CACHE_RETENTION=long`, fork dùng TTL một giờ. Conversation thành công có prompt từ

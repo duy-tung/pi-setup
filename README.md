@@ -279,7 +279,7 @@ parent session shutdown.
 
 | Extension | Behavior | User surface |
 |---|---|---|
-| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:off`; appends a display-only plain-language version | default off; `/present on\|off` |
+| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:off`; appends a display-only plain-language version | default off; `/present on\|off\|status` |
 | `fast-mode.ts` | Adds only Anthropic `speed: "fast"` and its beta; OAuth v0.3.2 merges required betas and blocks fine-grained streaming | `/fast` |
 | `statusline.ts` | Shows cwd, git branch, model, effort, context, cost, and Anthropic 5-hour/7-day limits | footer; `/limits` |
 
@@ -300,7 +300,18 @@ machine's history: exact repetition counts and prose slash tokens together cause
 rejection observed, on rewrites that had lost nothing. The thinking level is `off` and
 derived into `PRESENT_MODEL` rather than restated — `low` passed the same 4 of 6 rewrites
 at the same latency, and a drift between the spawn argument and the ownership check would
-fail every rewrite silently. The custom
+fail every rewrite silently.
+
+Because the pipeline is fail-open, every way a turn can end without a rewrite used to be a
+bare `return`, and a present that produced nothing was indistinguishable from a present that
+was switched off. That opacity is why a broken literal validator went unnoticed while the
+visible knobs got tuned instead. Each exit is now named, counted, and readable with
+`/present status`: `source-unsettled`, `source-too-short` (which reports an unterminated
+fence separately, since one can never be validated), `source-too-large`, `superseded`,
+`child-invalid`, `child-error`, `result-empty`, `result-too-large`, `fences-changed`,
+`literals-changed` (which names the literals lost or invented), `failed`, and `ok`. Counts
+are session-scoped and never written to disk, and detail text passes through the shared
+credential redactor before it can reach the screen. The custom
 entry shows per-rewrite model/token/cost metadata but does not add that usage to parent
 session totals. The original answer remains authoritative; any failure shows nothing.
 
