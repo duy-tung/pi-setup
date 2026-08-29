@@ -30,6 +30,7 @@ import {
   classifyFailure,
   confine,
   DENIAL_MARKER,
+  OFFLINE_CHILD_DENIAL_MARKER,
   PLAN_DENIAL_MARKER,
   READ_ONLY_CHILD_DENIAL_MARKER,
   RUNNER_MARKER,
@@ -67,6 +68,13 @@ function scrub(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 const sandboxActive = SEATBELT_AVAILABLE;
 /** Set by subagent.ts for profiles whose Bash must be read-only and offline. */
 const readOnlyChild = process.env.PI_SUBAGENT_READONLY === "1";
+const isChild = process.env.PI_SUBAGENT_DEPTH !== undefined && Number(process.env.PI_SUBAGENT_DEPTH) > 0;
+/**
+ * A child reads material nobody has reviewed and cannot ask for anything mid
+ * turn, so its network stays closed unless the user granted it when the child
+ * was started. The parent keeps unrestricted network: it is attended.
+ */
+const offlineChild = isChild && process.env.PI_SUBAGENT_NETWORK !== "1";
 
 /**
  * The child's own private directory, and the only writable root a read-only
@@ -116,10 +124,10 @@ export default function (pi: ExtensionAPI) {
       const effectiveCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 
       if (!sandboxActive) {
-        // A read-only child's guarantee is the OS profile, not the prompt.
-        if (readOnlyChild) {
+        // A child's guarantee is the OS profile, not the prompt.
+        if (readOnlyChild || offlineChild) {
           throw new Error(
-            "sandbox-bash: read-only subagent Bash requires the macOS sandbox, which is unavailable here. "
+            "sandbox-bash: confined subagent Bash requires the macOS sandbox, which is unavailable here. "
               + "Report this to the user instead of retrying.",
           );
         }
@@ -139,7 +147,7 @@ export default function (pi: ExtensionAPI) {
         roots,
         sensitiveReadRules(canonicalCwd),
         protectedWriteRules(canonicalCwd),
-        readOnlyChild,
+        readOnlyChild || offlineChild,
       );
 
       try {
@@ -156,7 +164,13 @@ export default function (pi: ExtensionAPI) {
           if (kind === "runner") throw new Error(`${error.message}\n\n${RUNNER_MARKER}`);
           if (kind === "denial") {
             throw new Error(
-              `${error.message}\n\n${readOnlyChild ? READ_ONLY_CHILD_DENIAL_MARKER : mode === "plan" ? PLAN_DENIAL_MARKER : DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
+              `${error.message}\n\n${readOnlyChild
+                ? READ_ONLY_CHILD_DENIAL_MARKER
+                : offlineChild
+                  ? OFFLINE_CHILD_DENIAL_MARKER
+                  : mode === "plan"
+                    ? PLAN_DENIAL_MARKER
+                    : DENIAL_MARKER}\n[sandbox: denial is final for the agent; report the exact command to the user]`,
             );
           }
         }

@@ -89,6 +89,12 @@ export interface SubagentRecord {
   model?: ModelSnapshot;
   thinkingLevel?: string;
   projectTrustedAtCreation: boolean;
+  /**
+   * Whether this child's Bash may reach the network. Absent means no, so a
+   * record written before the field existed resumes offline. It is part of the
+   * child's identity: a resume cannot turn it on.
+   */
+  network?: boolean;
   generation: number;
   status: SubagentStatus;
   lastOutcome?: string;
@@ -137,6 +143,7 @@ function parseRecord(value: unknown): { record?: SubagentRecord; reason?: Catalo
     || (value.sessionFile !== undefined && !boundedString(value.sessionFile, PATH_BYTES))
     || !isStatus(value.status)
     || typeof value.projectTrustedAtCreation !== "boolean"
+    || (value.network !== undefined && typeof value.network !== "boolean")
     || typeof value.generation !== "number"
     || !Number.isSafeInteger(value.generation)
     || value.generation < 1
@@ -217,7 +224,15 @@ function sameIdentity(a: SubagentRecord, b: SubagentRecord): boolean {
     && sameModel(a.model, b.model)
     && a.thinkingLevel === b.thinkingLevel
     && a.projectTrustedAtCreation === b.projectTrustedAtCreation
+    // Compared through Boolean so an absent field and an explicit false are the
+    // same grant, and a later entry cannot quietly add network access.
+    && childHasNetwork(a) === childHasNetwork(b)
     && a.createdAt === b.createdAt;
+}
+
+/** Network is granted once, at activation; absent means it was never granted. */
+export function childHasNetwork(record: Pick<SubagentRecord, "network">): boolean {
+  return record.network === true;
 }
 
 export function validSubagentTransition(previous: SubagentRecord, next: SubagentRecord): boolean {

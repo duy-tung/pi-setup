@@ -474,6 +474,56 @@ test("every no-approval tool name belongs to a tool this setup installs", () => 
   assert.deepEqual(unknown, []);
 });
 
+test("granting a work child network asks in Auto, and a resume cannot grant it", async () => {
+  const f = fixture();
+  try {
+    const handler = captureHandler("auto");
+    const offline = context(f.work, true);
+    // Auto delegates an offline work child without a prompt, as before.
+    assert.equal(
+      await handler(
+        { toolName: "subagent", input: { profile: "work", description: "implement parser", prompt: "details" } },
+        offline.value,
+      ),
+      undefined,
+    );
+    assert.equal(offline.calls.length, 0);
+
+    const granted = context(f.work, true);
+    assert.equal(
+      await handler(
+        { toolName: "subagent", input: { profile: "work", description: "install deps", prompt: "details", network: true } },
+        granted.value,
+      ),
+      undefined,
+    );
+    assert.equal(granted.calls.length, 1, "handing a child a socket must be visible in every mode");
+    assert.equal(granted.calls[0].kind, "confirm");
+    assert.match(granted.calls[0].title, /network access/);
+    assert.equal(granted.calls[0].message.includes("details"), false);
+
+    const refused = context(f.work, false);
+    const denied = await handler(
+      { toolName: "subagent", input: { profile: "work", description: "install deps", prompt: "details", network: true } },
+      refused.value,
+    );
+    assert.equal(denied.block, true);
+
+    // Resuming an existing child carries its original grant, so it never asks
+    // again for network it cannot change.
+    rememberPermissionSubagent("work-child", "work");
+    const resumed = context(f.work, true);
+    assert.equal(
+      await handler({ toolName: "send_message", input: { subagent_id: "work-child", message: "continue", network: true } }, resumed.value),
+      undefined,
+    );
+    assert.equal(resumed.calls.length, 0);
+  } finally {
+    f.cleanup();
+    resetPermissionRuntime();
+  }
+});
+
 test("read-only subagent Bash refuses to run unconfined", () => {
   const source = readFileSync(new URL("../extensions/sandbox-bash.ts", import.meta.url), "utf8");
   assert.match(source, /readOnlyChild = process\.env\.PI_SUBAGENT_READONLY === "1"/);
@@ -483,8 +533,10 @@ test("read-only subagent Bash refuses to run unconfined", () => {
   assert.match(source, /isUnder\(scratch, root\) && existsSync\(scratch\)/);
   assert.match(source, /mode === "plan"\s*\? \[\]/);
   // The profile carries the network deny, and no sandbox means no Bash at all.
-  assert.match(source, /protectedWriteRules\(canonicalCwd\),\s*readOnlyChild,/);
-  assert.match(source, /if \(readOnlyChild\) \{\s*throw new Error\(/);
+  assert.match(source, /protectedWriteRules\(canonicalCwd\),\s*readOnlyChild \|\| offlineChild,/);
+  assert.match(source, /if \(readOnlyChild \|\| offlineChild\) \{\s*throw new Error\(/);
+  // Any child is offline unless its activation recorded a network grant.
+  assert.match(source, /offlineChild = isChild && process\.env\.PI_SUBAGENT_NETWORK !== "1"/);
 
   const stateSource = readFileSync(new URL("../extensions/lib/subagent-state.ts", import.meta.url), "utf8");
   assert.match(stateSource, /readOnlyBash: true/);

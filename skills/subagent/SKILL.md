@@ -33,11 +33,11 @@ A background child returns its ID immediately. Its final report arrives automati
 
 - **`explore`** — `read,grep,find,ls,bash`; local investigation, planning, and review. Its Bash is confined to a read-only, offline Seatbelt profile: there is no network, and the only writable path is the child's own `$PI_SUBAGENT_SCRATCH`, so `git log`/`git diff`, log analysis, and counting all work while the workspace cannot change. Use scratch when a result is larger than a report or a pipeline needs an intermediate file: tell the child to name the files it leaves, then read them by path. That directory is deleted when this session ends, and its contents reach your context unfiltered, unlike a report. Without the macOS sandbox, Bash is dropped from the profile instead of running unconfined. Inherits the parent model and thinking level.
 - **`web`** — web search and library documentation only. Always ignores project resources and context files.
-- **`work`** — explicit local read/write/Bash tools plus library docs. Allowed only when the parent is in a trusted, non-broad workspace. Bash still has host network access.
+- **`work`** — explicit local read/write/Bash tools plus library docs. Allowed only when the parent is in a trusted, non-broad workspace. Its Bash is offline unless you pass `network: true`, which the user must approve in every mode except Bypass; ask only when the task itself fetches, such as installing dependencies. The grant is fixed when the child is created, so `send_message` cannot add it later — start a new child instead.
 
 Every child uses `--no-approve`: project extensions and context files are not loaded, so a project cannot shadow an allowed built-in tool name. Put relevant project rules in the standalone prompt. There is no separate reviewer profile: give `explore` a review brief. There is no nested delegation or conversation-fork profile.
 
-Filesystem access and network access do not meet in one child: `web` has no project files, and `explore` reads files but its Bash has no network. This reduces accidental data egress but is not process isolation: Pi and global extension code still run with the user's host authority.
+Filesystem access and network access do not meet in one child unless the user allows it: `web` has no project files, `explore` reads files but has no network, and a `work` child is offline until the user approves that exact activation. This reduces accidental data egress but is not process isolation: Pi and global extension code still run with the user's host authority.
 
 ## Write a complete prompt
 

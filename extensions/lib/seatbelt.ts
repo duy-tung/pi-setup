@@ -18,6 +18,8 @@ export const DENIAL_MARKER = "[sandbox: file access denied under workspace-write
 export const PLAN_DENIAL_MARKER = "[sandbox: file access denied under Plan read-only mode]";
 export const READ_ONLY_CHILD_DENIAL_MARKER =
 	"[sandbox: denied under read-only subagent mode — no writes and no network are available here]";
+export const OFFLINE_CHILD_DENIAL_MARKER =
+	"[sandbox: denied under offline subagent mode — this child was started without network access, which only the user can grant to a new child]";
 export const RUNNER_MARKER =
 	"[sandbox: sandbox runner failed — this is a sandbox problem, not a command failure; do not rewrite the command]";
 

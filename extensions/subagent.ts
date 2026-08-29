@@ -57,6 +57,7 @@ import {
   expectedSubagentArtifactDir,
   foldSubagentRecords,
   SCRATCH_DIR_NAME,
+  childHasNetwork,
   sanitizeSubagentReport,
   staleScratchDirs,
   subagentRecordPathsAreValid,
@@ -447,6 +448,7 @@ export default function (pi: ExtensionAPI) {
     label: string,
     profile: SubagentProfile,
     ctx: ExtensionContext,
+    network = false,
   ): SubagentRecord {
     const canonicalCwd = resolvePolicyPath(ctx.cwd, ctx.cwd).canonical;
     const parentSessionId = currentSessionId(ctx);
@@ -462,6 +464,7 @@ export default function (pi: ExtensionAPI) {
       ...(ctx.model ? { model: { provider: ctx.model.provider, id: ctx.model.id } } : {}),
       ...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
       projectTrustedAtCreation: profile === "work" && ctx.isProjectTrusted(),
+      network: profile === "work" && network,
       generation: 1,
       status: "running",
       createdAt: Date.now(),
@@ -624,6 +627,9 @@ export default function (pi: ExtensionAPI) {
           PI_SUBAGENT_SCRATCH: SUBAGENT_PROFILES[record.profile].scratch
             ? subagentScratchDir(record.artifactDir)
             : "",
+          // A child reaches the network only through a grant recorded at
+          // activation, so an unattended turn cannot acquire one later.
+          PI_SUBAGENT_NETWORK: childHasNetwork(record) ? "1" : "0",
         },
         stderrPath: join(record.artifactDir, `stderr-${record.generation}.log`),
         signal: startupController.signal,
@@ -1015,11 +1021,15 @@ export default function (pi: ExtensionAPI) {
       "Start independent background subagents together and continue useful work while they run; use foreground only when the next step needs the result.",
       "Give every fresh subagent a complete standalone prompt: it does not see this conversation.",
       "Use explore for local read-only work including git history and other offline Bash inspection, web for online research without project files, and work only for changes in a trusted workspace.",
+      "A work child is offline unless you request network, which the user must approve; ask for it only when the task itself fetches, such as installing dependencies.",
     ],
     parameters: Type.Object({
       description: Type.String({ description: "Short 3-5 word display label" }),
       prompt: Type.String({ description: "Complete standalone task, constraints, relevant paths, and deliverable" }),
       profile: StringEnum(["explore", "web", "work"] as const),
+      network: Type.Optional(Type.Boolean({
+        description: "Work profile only: allow the child's Bash to reach the network. Defaults to false and requires user approval; it cannot be changed by resuming the child.",
+      })),
       run_in_background: Type.Optional(Type.Boolean({ description: "Defaults to true; false waits for the final report" })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -1031,8 +1041,15 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const profile = params.profile as SubagentProfile;
+      if (params.network === true && profile !== "work") {
+        return {
+          content: [{ type: "text", text: `The ${profile} profile has no network by design; drop the network argument.` }],
+          details: { refused: "network-profile" },
+          isError: true,
+        };
+      }
       const id = randomUUID();
-      const record = recordForNew(id, labelOf(params.description), profile, ctx);
+      const record = recordForNew(id, labelOf(params.description), profile, ctx, params.network === true);
       try {
         const background = params.run_in_background !== false;
         const result = await startActivation(record, params.prompt, background, ctx, signal, true);

@@ -280,8 +280,10 @@ report: the parent reads those files by path, which is the one child output that
 parent context without redaction and marking. It is deleted when the parent session ends, and
 anything a crashed session left is swept after seven days. The `work`
 profile still requires the parent to be in a trusted,
-non-broad workspace, but the standalone child prompt must carry the relevant project rules;
-its Bash retains host network access. Manual and Accept edits treat each new/resumed work
+non-broad workspace, but the standalone child prompt must carry the relevant project rules.
+Its Bash is offline unless the `subagent` call passes `network: true`, which asks for
+confirmation in every mode except Bypass; the grant is recorded in the child's identity, so a
+resume cannot add it. Manual and Accept edits treat each new/resumed work
 activation as one broad approval scope because an unattended child cannot forward per-edit
 prompts. Plan blocks those activations, and no parent mode is passed into the child. These are
 model-tool restrictions and accident resistance, not process isolation. Because a profile names
@@ -476,9 +478,9 @@ The repository describes behavior. It is not a backup of conversations or secret
 
 This is an **accident-resistant, human-supervised local setup**, not a sandbox for hostile
 repositories or prompt injection. Pi and global extensions run with the user's host
-authority. Bash network access is unrestricted everywhere except a read-only `explore` child;
-whole-process isolation is required for untrusted or unattended work, as documented by Pi
-itself.
+authority. The parent's Bash network access is unrestricted, while every subagent is offline
+unless the user approved that activation; whole-process isolation is required for untrusted or
+unattended work, as documented by Pi itself.
 
 Focused policy tests use Node's built-in runner:
 

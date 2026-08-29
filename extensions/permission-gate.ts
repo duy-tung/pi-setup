@@ -163,17 +163,26 @@ async function confirmEveryTime(ctx: any, what: string, detail: string, cwd: str
     : blocked(`permission-gate: user denied ${what}. Do not retry or work around it.`);
 }
 
-function workDelegation(event: { toolName: string; input: Record<string, unknown> }): { work: boolean; detail: string } | undefined {
+function workDelegation(
+  event: { toolName: string; input: Record<string, unknown> },
+): { work: boolean; network: boolean; detail: string } | undefined {
   if (event.toolName === "subagent") {
     const profile = event.input.profile;
-    if (profile !== "work") return { work: false, detail: "" };
+    if (profile !== "work") return { work: false, network: false, detail: "" };
     const description = typeof event.input.description === "string" ? event.input.description.trim() : "delegated task";
-    return { work: true, detail: `work subagent activation: ${description.slice(0, 300)}` };
+    const network = event.input.network === true;
+    return {
+      work: true,
+      network,
+      detail: `work subagent activation${network ? " with network access" : ""}: ${description.slice(0, 300)}`,
+    };
   }
   if (event.toolName === "send_message") {
     const id = typeof event.input.subagent_id === "string" ? event.input.subagent_id : "";
     return {
       work: Boolean(id && permissionSubagentProfile(id) === "work"),
+      // A resume cannot change the grant the child was created with.
+      network: false,
       detail: `resume/queue work subagent: ${id || "unknown id"}`,
     };
   }
@@ -299,6 +308,12 @@ export default function (pi: ExtensionAPI) {
       if (!delegation.work) return;
       if (mode === "plan") {
         return blocked("permission-gate: work subagents are unavailable in Plan mode; use explore or web instead.");
+      }
+      // Network is the one child capability the user must see being handed
+      // over: an unattended child reads unreviewed material and, with a socket,
+      // can send it anywhere. Bypass still suppresses prompts.
+      if (delegation.network && mode !== "bypass") {
+        return confirmEveryTime(ctx, "work subagent with network access", delegation.detail, workspace);
       }
       if (mode === "manual" || mode === "accept-edits") {
         return confirmEveryTime(ctx, "mutation-capable work subagent", delegation.detail, workspace);

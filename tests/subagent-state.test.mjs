@@ -11,6 +11,7 @@ import {
   expectedSubagentArtifactDir,
   foldSubagentRecords,
   SCRATCH_MAX_AGE_MS,
+  childHasNetwork,
   sanitizeSubagentReport,
   staleScratchDirs,
   subagentScratchDir,
@@ -92,6 +93,33 @@ test("catalog rejects path and immutable-authority mutations", () => {
   assert.equal(folded.records.get("child-1").profile, "explore");
   assert.equal(folded.records.get("child-1").sessionFile, validSession);
   assert.deepEqual(folded.diagnostics.map((item) => item.reason), ["invalid-transition", "corrupt", "corrupt"]);
+});
+
+test("a network grant is fixed at creation and cannot be added by a later entry", () => {
+  const offline = foldSubagentRecords([
+    entry("start", record({ profile: "work", network: false })),
+    entry("self-grant", record({ profile: "work", network: true, updatedAt: 2 })),
+  ], "parent-1");
+  assert.equal(childHasNetwork(offline.records.get("child-1")), false);
+  assert.deepEqual(offline.diagnostics.map((item) => item.reason), ["invalid-transition"]);
+
+  // An absent field is the same grant as an explicit false, so a record written
+  // before the field existed keeps resuming offline.
+  const legacy = foldSubagentRecords([
+    entry("start", record({ profile: "work" })),
+    entry("progress", record({ profile: "work", network: false, status: "ready", updatedAt: 2 })),
+  ], "parent-1");
+  assert.equal(childHasNetwork(legacy.records.get("child-1")), false);
+  assert.deepEqual(legacy.diagnostics, []);
+
+  const granted = foldSubagentRecords([
+    entry("start", record({ profile: "work", network: true })),
+    entry("progress", record({ profile: "work", network: true, status: "ready", updatedAt: 2 })),
+  ], "parent-1");
+  assert.equal(childHasNetwork(granted.records.get("child-1")), true);
+
+  const corrupt = foldSubagentRecords([entry("bad", record({ network: "yes" }))], "parent-1");
+  assert.deepEqual(corrupt.diagnostics.map((item) => item.reason), ["corrupt"]);
 });
 
 test("admission atomically rejects same-child resumes, excess fan-out, and two writers", () => {
