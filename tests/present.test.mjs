@@ -20,7 +20,9 @@ const {
   PRESENT_MAX_RESULT_BYTES,
   PRESENT_MAX_SOURCE_BYTES,
   PRESENT_MODEL,
+  PRESENT_MODEL_ID,
   PRESENT_SYSTEM_PROMPT,
+  PRESENT_THINKING_LEVEL,
   buildPresentCliArgs,
   preservesFencedBlocks,
   preservesProtectedLiterals,
@@ -46,7 +48,6 @@ function deferred() {
 class FakeRpcChild {
   listeners = new Set();
   promptMessage = undefined;
-  lastText = null;
   disposed = false;
   state;
   resolveSettlement;
@@ -57,8 +58,8 @@ class FakeRpcChild {
 
   constructor(state = {}) {
     this.state = {
-      model: { provider: "openai-codex", id: "gpt-5.6-sol" },
-      thinkingLevel: "off",
+      model: { provider: "openai-codex", id: PRESENT_MODEL_ID },
+      thinkingLevel: PRESENT_THINKING_LEVEL,
       isStreaming: false,
       sessionId: "ephemeral-present",
       pendingMessageCount: 0,
@@ -91,12 +92,7 @@ class FakeRpcChild {
     return this.state;
   }
 
-  async getLastAssistantText() {
-    return this.lastText;
-  }
-
   complete(text, overrides = {}) {
-    this.lastText = text;
     const event = {
       type: "message_end",
       message: {
@@ -245,6 +241,8 @@ test("present CLI is an ephemeral fixed-model no-resource RPC child", () => {
   assert.equal(args[args.indexOf("--mode") + 1], "rpc");
   assert.equal(args[args.indexOf("--model") + 1], PRESENT_MODEL);
   assert.equal(args[args.indexOf("--system-prompt") + 1], PRESENT_SYSTEM_PROMPT);
+  assert.match(PRESENT_SYSTEM_PROMPT, /never swap quantities between contexts/);
+  assert.match(PRESENT_SYSTEM_PROMPT, /no escape or control characters/);
 });
 
 test("fenced-code validation is exact and incomplete fences are ineligible", () => {

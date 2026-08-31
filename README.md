@@ -296,28 +296,42 @@ parent session shutdown.
 
 | Extension | Behavior | User surface |
 |---|---|---|
-| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:off`; appends a display-only plain-language version | default off; `/present on\|off\|status` |
+| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:low`; appends a display-only plain-language version | default off; `/present on\|off\|status` |
 | `fast-mode.ts` | Adds only Anthropic `speed: "fast"` and its beta; OAuth v0.3.2 merges required betas and blocks fine-grained streaming | `/fast` |
 | `statusline.ts` | Shows cwd, git branch, model, effort, context, cost, and Anthropic 5-hour/7-day limits | footer; `/limits` |
 
 `present.ts` is a Pi port of the display-only and fail-open design from
 [claudish-to-english](https://github.com/gvzdv/claudish-to-english). After `/present on`, a
-private one-shot `--mode rpc --no-session` child uses the exact Pi executable and fixed
-`openai-codex/gpt-5.6-sol:off` model with no tools, project resources, or durable child
+private ephemeral `--mode rpc --no-session` child uses the exact Pi executable and fixed
+`openai-codex/gpt-5.6-sol:low` model with no tools, project resources, or durable child
 session. The answer travels over RPC stdin rather than a plaintext prompt file. Session/leaf
 generation guards, latest-wins cancellation, exact fenced-code checks, literal
 number/URL/path/inline-code validation, bounded output, and process-group teardown prevent
-mutated or stale rewrites from attaching to another turn.
+mutated or stale rewrites from attaching to another turn. Pi's settled `message_end` event is
+the text authority; present does not issue the redundant `get_last_assistant_text` request,
+which Pi 0.84.4 can answer without a valid text field after a successful settlement.
 
 Literal validation asks that nothing disappears and that no quantity is invented; it does
 not compare how often a literal recurs, because merging two sentences that cite the same
 symbol is a rewrite doing its job. Bare `a/b` prose tokens (`yes/no`, `Pro/Max`) are not
 treated as paths. Both rules come from running the real pipeline over answers from this
 machine's history: exact repetition counts and prose slash tokens together caused every
-rejection observed, on rewrites that had lost nothing. The thinking level is `off` and
-derived into `PRESENT_MODEL` rather than restated — `low` passed the same 4 of 6 rewrites
-at the same latency, and a drift between the spawn argument and the ownership check would
-fail every rewrite silently.
+rejection observed, on rewrites that had lost nothing. The current choice comes from a
+quality-only, secret-screened benchmark of 24 real answers (each at most 6 KB) covering
+every Pi reasoning label on both models: Terra and Sol at `off`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`, one production-faithful turn per call. Mechanical validity was
+flat-to-falling as effort rose — Sol 19/18/18/18/17/17 and Terra 17/18/15/15/17/16 from
+`off` through `xhigh` — so extra reasoning bought no reliability. `max` disqualified itself
+operationally on both models: 208–213-second calls, repeated 240-second timeouts, and the
+lowest validity of any arm. Tier-one blind reviews inside each model picked Sol `low`
+(perfect 5.00 fidelity, clarity, and instruction fit) and Terra `off`. In the decoded
+tier-two head-to-head, Sol `low` won 3 cases to Terra `off`'s 1 with 2 ties, and both
+localized fidelity losses — an ownership swap and dropped review-scope evidence — sat on
+the Terra side. Fidelity is the first decision axis, so production keeps Sol `low`. A
+static-retry experiment remains excluded: it rescued only 1 of 9 failures while adding
+latency and cost. Provider, model, and effort are derived
+into `PRESENT_MODEL` rather than restated; drift between the spawn argument and ownership
+check would fail every rewrite silently.
 
 Because the pipeline is fail-open, every way a turn can end without a rewrite used to be a
 bare `return`, and a present that produced nothing was indistinguishable from a present that

@@ -269,17 +269,30 @@ child. Đây là tool/profile restriction để giảm tai nạn, không phải 
 network vẫn unrestricted.
 
 `present.ts` không phải public subagent. Exact `/present on` mới cho phép gửi future eligible
-answers sang private one-shot RPC `openai-codex/gpt-5.6-sol:off`. Original answer luôn là
+answers sang private ephemeral RPC `openai-codex/gpt-5.6-sol:low`. Original answer luôn là
 nguồn authority. Rewrite chỉ để hiển thị, fail-open, không tạo durable child và usage không
 được cộng vào parent footer totals. Fenced code cùng literal number, URL, path và inline code
-phải giữ exact; mutation làm rewrite bị drop. `/reload` reset nó về off.
+phải giữ exact; mutation làm rewrite bị drop. Event `message_end` đã settle là nguồn text;
+present không gọi thêm `get_last_assistant_text`, vì Pi 0.84.4 đôi khi trả field text không hợp
+lệ ở request thừa đó dù settlement đã thành công. `/reload` reset present về off.
 
 Validator đòi **không được mất gì** và **không được bịa số**, nhưng không so số lần lặp lại —
 gộp hai câu cùng nhắc một ký hiệu là việc rewrite phải làm. Token văn xuôi dạng `a/b`
 (`yes/no`, `Pro/Max`) không bị coi là path. Cả hai đến từ việc chạy pipeline thật trên answer
 trong lịch sử máy này: đếm số lần lặp và slash trong văn xuôi là nguyên nhân của *mọi* lần bị
-loại quan sát được, trên các rewrite không mất gì cả. Thinking level để `off` và được derive
-vào `PRESENT_MODEL` chứ không viết lặp — `low` pass đúng 4/6 như `off` với cùng latency, còn
+loại quan sát được, trên các rewrite không mất gì cả. Lựa chọn hiện tại đến từ benchmark
+quality-only trên 24 answer thật đã lọc secret (mỗi answer tối đa 6 KB), phủ **mọi** reasoning
+label của Pi trên cả hai model: Terra và Sol × `off`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, mỗi call một lượt đúng production. Mechanical validity đi ngang rồi giảm khi
+effort tăng — Sol 19/18/18/18/17/17 và Terra 17/18/15/15/17/16 từ `off` đến `xhigh` — nghĩa là
+suy nghĩ thêm không mua được reliability. `max` tự loại về mặt vận hành trên cả hai model:
+call 208–213 giây, timeout 240 giây lặp lại, validity thấp nhất mọi arm. Blind review tầng 1
+trong từng model chọn Sol `low` (fidelity, clarity, instruction fit đều 5.00) và Terra `off`.
+Chung kết tầng 2 sau decode: Sol `low` thắng 3 case, Terra `off` thắng 1, hòa 2 — và cả hai
+vết trừ fidelity cục bộ (đổi ngôi sở hữu; bỏ bằng chứng phạm vi review) đều nằm phía Terra.
+Fidelity là trục quyết định đầu tiên, nên production giữ Sol `low`. Static retry vẫn bị loại
+vì chỉ cứu 1/9 failure nhưng tăng latency/cost. Provider, model và effort được derive vào
+`PRESENT_MODEL` chứ không viết lặp;
 lệch giữa tham số spawn và ownership check thì mọi rewrite fail im lặng.
 
 Vì pipeline fail-open, trước đây mọi lối thoát không ra rewrite đều là `return` trần — present

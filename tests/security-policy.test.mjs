@@ -595,7 +595,7 @@ test("RPC subagent has no tmux, cwd override, or legacy control surface", () => 
   assert.match(present, /--no-extensions/);
   // Derived from one thinking level rather than restated: a drift between the
   // spawn argument and the ownership check fails every rewrite silently.
-  assert.match(present, /PRESENT_THINKING_LEVEL = "off"/);
+  assert.match(present, /PRESENT_THINKING_LEVEL = "low"/);
   assert.match(present, /PRESENT_MODEL_PROVIDER = "openai-codex"/);
   assert.match(present, /PRESENT_MODEL_ID = "gpt-5\.6-sol"/);
   assert.match(
@@ -604,6 +604,7 @@ test("RPC subagent has no tmux, cwd override, or legacy control surface", () => 
   );
   assert.match(present, /state\.thinkingLevel === PRESENT_THINKING_LEVEL/);
   assert.match(present, /void settlement\.catch\(\(\) => \{\}\)/);
+  assert.equal(present.includes("getLastAssistantText"), false);
   assert.equal(present.includes("execFile"), false);
   assert.equal(present.includes("pi.sendMessage"), false);
 });
