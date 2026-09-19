@@ -1,18 +1,30 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RewindState } from "./state.js";
+import { isCurrentSession, type RewindState } from "./state.js";
 import type { ApplyResult, PromptCheckpoint, RestoreMode, RestorePlan } from "./types.js";
 import { applySucceeded } from "./apply-result.js";
-import { applyPlan, applyUndo, discardRestorePlan, pickCheckpointForEntry, planRestore, planUndo, waitReady } from "./checkpoints.js";
-import { formatPlan, group, isEmpty, needsConfirmation, outsideItems, summarise } from "./plan.js";
+import { applyPlan, applyUndo, discardRestorePlan, pickCheckpointForEntry, planRestore, planUndo, projectModeChangeCount, projectModeMapChangeCount, waitReady } from "./checkpoints.js";
+import { formatPlan, formatTotal, group, isEmpty, isOutsideItem, needsConfirmation, outsideItems, summarise } from "./plan.js";
+import { countable, lineStats, readRegular, type LineStats } from "./line-stats.js";
+import { join } from "node:path";
+import { runBackend } from "./backend-lifetime.js";
 
-const ACTIONS: { label: string; value: RestoreMode }[] = [
-  { label: "Restore code and conversation", value: "all" },
+function flowGuard(state: RewindState): () => boolean {
+  const generation = state.gen, lifetime = state.lifetime;
+  return () => state.gen === generation && state.lifetime === lifetime && !lifetime?.closed;
+}
+
+/** Code options exist only for prompts that have a checkpoint, as in Claude
+ *  Code's menu: offering a restore that ends in "no checkpoint" is noise. */
+const ACTIONS: { label: string; value: RestoreMode; needsCheckpoint?: boolean }[] = [
+  { label: "Restore code and conversation", value: "all", needsCheckpoint: true },
   { label: "Restore conversation only", value: "conversation" },
-  { label: "Restore code only", value: "files" },
-  { label: "Summarize up to here", value: "summarize-up" },
-  { label: "Summarize from here", value: "summarize-from" },
+  { label: "Restore code only", value: "files", needsCheckpoint: true },
+  { label: "Compact, focusing on this prompt", value: "compact-focus" },
   { label: "Cancel", value: "cancel" },
 ];
+
+/** Files past this many are applied but not counted; the preview says so. */
+const MAX_STAT_ITEMS = 200;
 
 const UNDO_LABEL = "↩ Undo last rewind";
 
@@ -51,7 +63,7 @@ function listUserPrompts(state: RewindState, ctx: any) {
   return out.reverse();
 }
 
-function reportApply(ctx: any, result: ApplyResult | null): void {
+export function reportApply(ctx: any, result: ApplyResult | null, plan?: RestorePlan, stats?: LineStats): void {
   if (!result) {
     ctx.ui.notify("Rewind unavailable (no workspace)", "warning");
     return;
@@ -59,6 +71,12 @@ function reportApply(ctx: any, result: ApplyResult | null): void {
   const bits: string[] = [];
   if (result.restored) bits.push(`${result.restored} restored`);
   if (result.deleted) bits.push(`${result.deleted} deleted`);
+  // Equal file counts do not prove equal paths or bytes. Keep these explicitly
+  // labelled as preview estimates, never measured results of the locked apply.
+  const previewed = plan?.items.filter(countable).length ?? 0;
+  if (plan && stats?.size && !result.skipped.length && !result.errors.length && result.restored + result.deleted === previewed) {
+    bits.push(`preview estimate: ${formatTotal(plan, stats)}`);
+  }
   const base = bits.length ? bits.join(", ") : "nothing to change";
 
   if (result.errors.length) {
@@ -70,35 +88,83 @@ function reportApply(ctx: any, result: ApplyResult | null): void {
   }
 }
 
+/** `+/−` per file for the preview. Best effort and bounded: it must never
+ *  turn a restore that would have worked into one that cannot be previewed. */
+async function previewStats(state: RewindState, plan: RestorePlan): Promise<LineStats> {
+  const ws = state.ws;
+  const cwd = ws?.cwd ?? state.cwd;
+  try {
+    return await lineStats(plan, {
+      current: (item, max) => readRegular(isOutsideItem(item) ? item.path : join(cwd, item.display), max),
+      target: (item, max) => (isOutsideItem(item) ? state.outside?.targetBlob(item, max) ?? null : ws?.targetBlob(item, max) ?? null),
+    }, MAX_STAT_ITEMS, state.lifetime?.queued.signal);
+  } catch {
+    return new Map();
+  }
+}
+
 /**
  * Preview then apply. Type changes can `rm -rf` a directory that the snapshot
  * never described, so they are always a second, explicit decision.
  */
+async function restoreBlocked(state: RewindState, ctx: any): Promise<boolean> {
+  const alive = flowGuard(state);
+  if (!alive()) return true;
+  const reason = ctx.isIdle?.() === false
+    ? "Wait for the active response to finish before restoring files."
+    : await state.restoreBlocker?.();
+  if (!alive()) return true;
+  if (!reason) return false;
+  ctx.ui.notify(reason, "warning");
+  return true;
+}
+
 async function restoreFiles(state: RewindState, ctx: any, cp: PromptCheckpoint): Promise<boolean> {
+  const alive = flowGuard(state);
+  try { return await restoreFilesChecked(state, ctx, cp); }
+  catch (error) {
+    if (alive()) ctx.ui.notify(`File rewind failed: ${(error as Error).message}`, "error");
+    return false;
+  }
+}
+
+async function restoreFilesChecked(state: RewindState, ctx: any, cp: PromptCheckpoint): Promise<boolean> {
+  const alive = flowGuard(state);
+  if (!alive() || await restoreBlocked(state, ctx) || !alive()) return false;
   // A projectless session has no workspace by design, and its plan is made of
   // outside items only — not a failure to report.
-  if (!(await waitReady(state)) && !state.disabled) {
+  const ready = await waitReady(state);
+  if (!alive()) return false;
+  if (!ready && !state.disabled) {
     ctx.ui.notify(state.readyError ?? "Workspace not ready", "warning");
     return false;
   }
 
-  const plan: RestorePlan | null = await planRestore(state, cp);
+  const plan: RestorePlan | null = await runBackend(state.lifetime, () => planRestore(state, cp));
+  if (!alive()) return false;
   if (!plan) {
     ctx.ui.notify("That checkpoint is no longer in the shadow store", "warning");
     return false;
   }
-  if (isEmpty(plan)) {
-    await discardRestorePlan(state, plan);
-    ctx.ui.notify("No file changes to rewind", "info");
+  const modeChanges = projectModeChangeCount(state, cp);
+  if (isEmpty(plan) && modeChanges === 0) {
+    await runBackend(state.lifetime, () => discardRestorePlan(state, plan));
+    if (!alive()) return false;
+    ctx.ui.notify(plan.items.length ? `${summarise(plan)}:\n\n${formatPlan(plan)}` : "No file changes to rewind", plan.items.length ? "warning" : "info");
     return true;
   }
 
+  const modeSummary = modeChanges === 0 ? "" : `${modeChanges} permission change(s); `;
+  const stats = await runBackend(state.lifetime, () => previewStats(state, plan));
+  if (!alive()) return false;
   const proceed = await ctx.ui.confirm(
-    `Rewind files (${summarise(plan)}):\n\n${formatPlan(plan)}`,
+    `Rewind files (${modeSummary}${summarise(plan, stats)}):\n\n${formatPlan(plan, stats)}`,
     "Apply these changes?",
   );
+  if (!alive()) return false;
   if (!proceed) {
-    await discardRestorePlan(state, plan);
+    await runBackend(state.lifetime, () => discardRestorePlan(state, plan));
+    if (!alive()) return false;
     ctx.ui.notify("Rewind cancelled", "info");
     return false;
   }
@@ -115,6 +181,7 @@ async function restoreFiles(state: RewindState, ctx: any, cp: PromptCheckpoint):
         outside.map((i) => `  ${i.action === "delete" ? "delete " : "restore"}   ${i.display}`).join("\n"),
       "Restore those too?",
     );
+    if (!alive()) return false;
   }
 
   let includeTypeChanges = false;
@@ -126,14 +193,25 @@ async function restoreFiles(state: RewindState, ctx: any, cp: PromptCheckpoint):
         tc.map((i) => `  ${i.display}   ${i.reason ?? ""}`).join("\n"),
       "Replace them too?",
     );
+    if (!alive()) return false;
   }
 
-  const result = await applyPlan(state, plan, { includeTypeChanges, includeOutside });
-  reportApply(ctx, result);
+  const blocked = await restoreBlocked(state, ctx);
+  if (!alive()) return false;
+  if (blocked) {
+    await runBackend(state.lifetime, () => discardRestorePlan(state, plan));
+    return false;
+  }
+  const result = await runBackend(state.lifetime, () => applyPlan(state, plan, { includeTypeChanges, includeOutside }));
+  if (!alive()) return false;
+  // Content and permission restoration both finish inside applyPlan's lock.
+  reportApply(ctx, result, plan, stats);
   return applySucceeded(result);
 }
 
 async function restoreConversation(state: RewindState, ctx: any, entryId: string): Promise<void> {
+  const alive = flowGuard(state);
+  if (!alive()) return;
   if (typeof ctx.navigateTree !== "function") {
     ctx.ui.notify("Conversation rewind needs an interactive command context", "warning");
     return;
@@ -142,39 +220,59 @@ async function restoreConversation(state: RewindState, ctx: any, entryId: string
   try {
     await ctx.navigateTree(entryId);
   } catch (err) {
-    ctx.ui.notify(`Conversation rewind failed: ${err instanceof Error ? err.message : err}`, "warning");
+    if (alive()) ctx.ui.notify(`Conversation rewind failed: ${err instanceof Error ? err.message : err}`, "warning");
   } finally {
-    state.suppressTreeHook = false;
+    if (alive()) state.suppressTreeHook = false;
   }
 }
 
-function summarizeFrom(ctx: any, mode: "summarize-up" | "summarize-from", prompt: string): void {
+/**
+ * Pi's `compact()` chooses its own cut point from the token budget; a command
+ * cannot pin one (SPEC § Not covered). So this is an ordinary compaction whose
+ * summary is asked to centre on the chosen prompt — not Claude Code's
+ * "summarize up to / from here", which the menu no longer promises.
+ */
+function compactFocused(ctx: any, prompt: string, alive: () => boolean): void {
   if (typeof ctx.compact !== "function") {
     ctx.ui.notify("Compaction API not available", "warning");
     return;
   }
-  const focus =
-    mode === "summarize-up"
-      ? `Summarize conversation history BEFORE this user prompt; keep this prompt and everything after as the live tail.\n\nSelected prompt:\n${prompt}`
-      : `Summarize from this user prompt through the latest messages; keep earlier messages intact if possible.\n\nSelected prompt:\n${prompt}`;
   ctx.compact({
-    customInstructions: focus,
-    onComplete: () => ctx.ui.notify("Summary compaction finished", "info"),
-    onError: (error: Error) => ctx.ui.notify(`Summarize failed: ${error.message}`, "error"),
+    customInstructions:
+      `The user selected the prompt below as the point that matters most. In the summary, preserve its intent, ` +
+      `the decisions and outcomes that followed it, and any files or facts still needed to continue it.\n\n` +
+      `Selected prompt:\n${prompt}`,
+    onComplete: () => { if (alive()) ctx.ui.notify("Compaction finished (Pi chose the cut point; the selected prompt guided the summary)", "info"); },
+    onError: (error: Error) => { if (alive()) ctx.ui.notify(`Compaction failed: ${error.message}`, "error"); },
   });
 }
 
 async function doUndo(state: RewindState, ctx: any): Promise<void> {
-  const prepared = await planUndo(state);
+  const alive = flowGuard(state);
+  try { await doUndoChecked(state, ctx); }
+  catch (error) { if (alive()) ctx.ui.notify(`Undo failed: ${(error as Error).message}`, "error"); }
+}
+
+async function doUndoChecked(state: RewindState, ctx: any): Promise<void> {
+  const alive = flowGuard(state);
+  if (!alive() || await restoreBlocked(state, ctx) || !alive()) return;
+  const prepared = await runBackend(state.lifetime, () => planUndo(state));
+  if (!alive()) return;
   if (!prepared) {
     ctx.ui.notify("Nothing to undo", "warning");
     return;
   }
-  if (!isEmpty(prepared.plan)) {
+  const modeChanges = projectModeMapChangeCount(state, prepared.plan.projectModesTo);
+  let stats: LineStats | undefined;
+  if (!isEmpty(prepared.plan) || modeChanges > 0) {
+    const modeSummary = modeChanges ? `${modeChanges} permission change(s); ` : "";
+    stats = await runBackend(state.lifetime, () => previewStats(state, prepared.plan));
+    if (!alive()) return;
     const proceed = await ctx.ui.confirm(
-      `Undo last rewind (${summarise(prepared.plan)}):\n\n${formatPlan(prepared.plan)}`,
+      `Undo last rewind (${modeSummary}${summarise(prepared.plan, stats)}):\n\n${formatPlan(prepared.plan, stats)}`,
       "Apply these changes?",
     );
+    if (!alive()) return;
     if (!proceed) {
       ctx.ui.notify("Undo cancelled", "info");
       return;
@@ -190,13 +288,18 @@ async function doUndo(state: RewindState, ctx: any): Promise<void> {
         changes.map((item) => `  ${item.display}   ${item.reason ?? ""}`).join("\n"),
       "Replace them too?",
     );
+    if (!alive()) return;
   }
-  const result = await applyUndo(state, prepared, { includeTypeChanges });
-  reportApply(ctx, result);
+  if (await restoreBlocked(state, ctx) || !alive()) return;
+  const result = await runBackend(state.lifetime, () => applyUndo(state, prepared, { includeTypeChanges }));
+  if (!alive()) return;
+  reportApply(ctx, result, prepared.plan, stats);
 }
 
 async function showCoverage(state: RewindState, ctx: any): Promise<void> {
+  const alive = flowGuard(state);
   const ws = await waitReady(state);
+  if (!alive()) return;
   const out = state.outside;
   const refused = out ? [...out.refused] : [];
   const refusedLines = refused.length
@@ -254,7 +357,8 @@ async function showCoverage(state: RewindState, ctx: any): Promise<void> {
 }
 
 export async function runRewindFlow(state: RewindState, ctx: any): Promise<void> {
-  if (!ctx.hasUI) return;
+  const alive = flowGuard(state);
+  if (!ctx.hasUI || !alive() || !isCurrentSession(state, ctx)) return;
 
   if (state.disabled) {
     const n = state.outside?.size ?? 0;
@@ -279,38 +383,42 @@ export async function runRewindFlow(state: RewindState, ctx: any): Promise<void>
   }
 
   const choice = await ctx.ui.select("Rewind to prompt:", items);
-  if (!choice) return;
+  if (!choice || !alive()) return;
   if (choice === UNDO_LABEL) return doUndo(state, ctx);
   if (choice === "· coverage report") return showCoverage(state, ctx);
 
   const picked = prompts.find((p) => p.label === choice);
   if (!picked) return;
 
-  const mode = await chooseAction(ctx);
-  if (mode === "cancel") return;
+  const cp = state.checkpoints.get(picked.id);
+  const mode = await chooseAction(ctx, cp !== undefined);
+  if (mode === "cancel" || !alive()) return;
 
-  if (mode === "summarize-up" || mode === "summarize-from") {
-    summarizeFrom(ctx, mode, picked.text);
+  if (mode === "compact-focus") {
+    compactFocused(ctx, picked.text, alive);
     return;
   }
 
-  const cp = state.checkpoints.get(picked.id);
-  if (mode === "files" || mode === "all") {
-    if (!cp) {
-      ctx.ui.notify("No file checkpoint for this prompt", "warning");
-      if (mode === "files") return;
-    } else if (!(await restoreFiles(state, ctx, cp))) {
-      return;
-    }
+  // Pi dispatches extension commands before its own streaming queue check. Do
+  // not apply files for a combined rewind unless conversation navigation can
+  // run too, or the two states diverge while the active answer continues.
+  if ((mode === "conversation" || mode === "all") && ctx.isIdle?.() === false) {
+    ctx.ui.notify("Wait for the active response to finish before rewinding the conversation", "warning");
+    return;
   }
-  if (mode === "conversation" || mode === "all") {
+
+  if ((mode === "files" || mode === "all") && cp && !(await restoreFiles(state, ctx, cp))) {
+    return;
+  }
+  if (alive() && (mode === "conversation" || mode === "all")) {
     await restoreConversation(state, ctx, picked.id);
   }
 }
 
-async function chooseAction(ctx: any): Promise<RestoreMode> {
-  const choice = await ctx.ui.select("Restore Options", ACTIONS.map((a) => a.label));
-  return ACTIONS.find((a) => a.label === choice)?.value ?? "cancel";
+async function chooseAction(ctx: any, hasCheckpoint: boolean): Promise<RestoreMode> {
+  const actions = ACTIONS.filter((a) => hasCheckpoint || !a.needsCheckpoint);
+  const choice = await ctx.ui.select("Restore Options", actions.map((a) => a.label));
+  return actions.find((a) => a.label === choice)?.value ?? "cancel";
 }
 
 /** Selecting a node in /tree is a rewind of the conversation; offer to bring
@@ -320,6 +428,7 @@ export async function handleTreeRestore(
   event: { preparation: { targetId: string } },
   ctx: any,
 ): Promise<{ cancel: true } | undefined> {
+  if (!isCurrentSession(state, ctx)) return { cancel: true };
   if (state.suppressTreeHook || !ctx.hasUI) return undefined;
   return offerRestore(state, ctx, event.preparation.targetId, "Restore code only");
 }
@@ -329,6 +438,7 @@ export async function handleForkRestore(
   event: { entryId: string },
   ctx: any,
 ): Promise<{ cancel: true } | undefined> {
+  if (!isCurrentSession(state, ctx)) return { cancel: true };
   if (!ctx.hasUI) return undefined;
   return offerRestore(state, ctx, event.entryId, "Restore code only (cancel fork)");
 }
@@ -339,6 +449,8 @@ async function offerRestore(
   targetId: string,
   codeOnlyLabel: string,
 ): Promise<{ cancel: true } | undefined> {
+  const alive = flowGuard(state);
+  if (!alive()) return { cancel: true };
   const cp = pickCheckpointForEntry(state, targetId, (id) => ctx.sessionManager.getEntry(id));
 
   // Nothing to add: with no checkpoint and no undo, every option in this menu is
@@ -357,7 +469,7 @@ async function offerRestore(
   options.push("Cancel");
 
   const choice = await ctx.ui.select("Restore Options", options);
-  if (!choice || choice === "Cancel") return { cancel: true };
+  if (!choice || choice === "Cancel" || !alive()) return { cancel: true };
   if (choice === UNDO_LABEL) {
     await doUndo(state, ctx);
     return { cancel: true };
@@ -366,7 +478,7 @@ async function offerRestore(
 
   const applied = await restoreFiles(state, ctx, cp);
   if (choice === codeOnlyLabel) return { cancel: true };
-  return applied ? undefined : { cancel: true };
+  return applied && alive() ? undefined : { cancel: true };
 }
 
 export function registerCommands(pi: ExtensionAPI, state: RewindState): void {

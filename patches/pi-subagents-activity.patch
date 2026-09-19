@@ -1,0 +1,19 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -2310,6 +2310,16 @@
+    * background run.
+    */
+   const workflowTasks = new Map<string, WorkflowTask>();
++
++  // pi-setup's rewind must include nested agents, queued work, and workflows
++  // that are between child activations. Read-only query; no agent control.
++  pi.events.on("pi-setup:subagents:activity", (request: any) => {
++    if (typeof request?.reply !== "function") return;
++    request.reply({
++      active: manager.hasRunning()
++        || [...workflowTasks.values()].some(task => task.status === "running"),
++    });
++  });
+ 
+   /**
+    * Workflow runs as the fleet list wants them.

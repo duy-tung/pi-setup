@@ -1,0 +1,3 @@
+export PI_CACHE_RETENTION=long
+PI_CACHE_RETENTION = "long"
+PI_ANTHROPIC_OAUTH_REWRITE_MODE = "technical-safe"

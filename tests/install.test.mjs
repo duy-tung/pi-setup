@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -11,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +22,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const installer = join(root, "install.sh");
 const pinnedPiVersion = readFileSync(installer, "utf8").match(/^PI_VERSION="([^"]+)"/m)[1];
-const managed = ["AGENTS.md", "settings.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts"];
+const managed = ["AGENTS.md", "settings.json", "zentui.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts", "agents"];
 
 function write(path, content, mode) {
   mkdirSync(dirname(path), { recursive: true });
@@ -96,6 +98,7 @@ test("config-only install backs up managed config and preserves all runtime stat
     const backups = readdirSync(backupRoot);
     assert.equal(backups.length, 1);
     const backup = join(backupRoot, backups[0]);
+    assert.equal(readFileSync(join(backup, ".pi-setup-managed-backup-v1"), "utf8"), "pi-setup-managed-config-backup-v1\n");
     assert.equal(readFileSync(join(backup, "AGENTS.md"), "utf8"), "old agents\n");
     assert.equal(readFileSync(join(backup, "extensions", "old.ts"), "utf8"), "old extension\n");
 
@@ -139,6 +142,31 @@ test("doctor rejects regular managed-file mode drift", () => {
   } finally {
     f.cleanup();
   }
+});
+
+test("JSON formatting and mtimes do not cause false drift or redundant installs", () => {
+  const f = fixture();
+  try {
+    const first = runInstall(f.home);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const settings = join(f.agent, "settings.json");
+    const data = JSON.parse(readFileSync(settings, "utf8"));
+    writeFileSync(settings, JSON.stringify(Object.fromEntries(Object.entries(data).reverse())));
+    const extension = join(f.agent, "extensions/fast-mode.ts");
+    utimesSync(extension, new Date(0), new Date(0));
+    utimesSync(join(f.agent, "agents"), new Date(0), new Date(0));
+    let result = runDoctor(f.home);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    result = runInstall(f.home);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /already matches/);
+    data.quietStartup = !data.quietStartup;
+    writeFileSync(settings, JSON.stringify(data));
+    assert.notEqual(runDoctor(f.home).status, 0, "different JSON values still fail");
+    writeFileSync(settings, readFileSync(join(root, "settings.json")));
+    writeFileSync(extension, readFileSync(extension, "utf8") + "\n// real drift\n");
+    assert.notEqual(runDoctor(f.home).status, 0, "content changes still fail");
+  } finally { f.cleanup(); }
 });
 
 test("installer fails closed when another setup operation owns the shared lock", () => {
@@ -313,6 +341,176 @@ test("failed package reconciliation restores prior Pi package stores", () => {
   }
 });
 
+test("I4 early validation failure removes stage and releases the operation lock", () => {
+  const f = fixture();
+  try {
+    const fakeBin = join(f.home, "fake-bin");
+    mkdirSync(fakeBin);
+    write(join(fakeBin, "node"), "#!/bin/sh\nexit 77\n", 0o755);
+    const result = runInstall(f.home, { PATH: `${fakeBin}:${process.env.PATH}` });
+    assert.equal(result.status, 77, `${result.stdout}\n${result.stderr}`);
+    assert.equal(readdirSync(f.agent).some((name) => name.startsWith(".pi-setup-stage.")), false);
+    assert.equal(existsSync(join(f.home, ".local", "state", "pi-setup", "operation.lock")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("I5-I7 source keeps cleanup traps active and makes package patching transactional", () => {
+  const source = readFileSync(installer, "utf8");
+  const firstTrap = source.indexOf("trap finish EXIT");
+  assert.ok(firstTrap > 0 && firstTrap < source.indexOf('STAGE="$AGENT_DIR/.pi-setup-stage.$$"'));
+  const finish = source.slice(source.indexOf("finish() {"), source.indexOf("trap finish EXIT"));
+  assert.match(finish, /FINISHING=1/);
+  assert.match(finish, /SIGNAL_DURING_FINISH/);
+  assert.ok(finish.indexOf("restore_packages") < finish.indexOf("trap - EXIT INT TERM HUP"));
+  assert.ok(finish.indexOf("release_operation_lock") < finish.indexOf("trap - EXIT INT TERM HUP"));
+
+  assert.match(source, /MISE_GLOBAL_CONFIG_FILE:-/);
+  assert.match(source, /MISE_CONFIG_DIR:-/);
+  assert.match(source, /MISE_CONFIG="\$\{MISE_CONFIG_DIR%\/\}\/config\.toml"/);
+  const selection = source.slice(
+    source.indexOf('if [ -n "${MISE_GLOBAL_CONFIG_FILE:-}" ]'),
+    source.indexOf('MODE="full"'),
+  );
+  const probeRoot = mkdtempSync(join(tmpdir(), "pi-mise-selection-"));
+  try {
+    const customDir = join(probeRoot, "custom mise");
+    const globalFile = join(probeRoot, "global.toml");
+    const evaluate = (env) => spawnSync("/bin/bash", ["-c", `set -u\nHOME_REAL="$HOME"\n${selection}\nprintf '%s' "$MISE_CONFIG"`], {
+      env: { ...process.env, HOME: probeRoot, MISE_GLOBAL_CONFIG_FILE: "", MISE_CONFIG_DIR: "", XDG_CONFIG_HOME: join(probeRoot, "xdg"), ...env },
+      encoding: "utf8",
+    });
+    assert.equal(evaluate({ MISE_CONFIG_DIR: customDir }).stdout, join(customDir, "config.toml"));
+    assert.equal(evaluate({ MISE_CONFIG_DIR: customDir, MISE_GLOBAL_CONFIG_FILE: globalFile }).stdout, globalFile);
+    assert.equal(evaluate({}).stdout, join(probeRoot, "xdg", "mise", "config.toml"));
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+
+  const ready = source.slice(source.indexOf("packages_ready()"), source.indexOf("prepare_package_transaction()"));
+  assert.match(ready, /scripts\/package-health\.mjs/);
+  const packageFlow = source.slice(source.indexOf("if packages_ready;"), source.indexOf('"$ROOT/doctor.sh"'));
+  assert.ok(packageFlow.indexOf("prepare_package_transaction") < packageFlow.indexOf("package-patches.mjs"));
+});
+
+test("I8 reconciliation copies the prior npm store before updating managed pins", () => {
+  const f = fixture();
+  try {
+    const source = readFileSync(installer, "utf8");
+    const copyExisting = source.slice(source.indexOf("copy_existing() {"), source.indexOf("\nprune_managed_backups() {"));
+    const prepare = source.slice(source.indexOf("prepare_package_transaction() {"), source.indexOf('\nif [ "$MODE" = "full" ]; then\n  RUNTIME_BACKUP='));
+    const runtimeBackup = join(f.home, "transaction");
+    mkdirSync(runtimeBackup);
+    const unrelated = join(f.agent, "npm", "node_modules", "unrelated-package");
+    write(join(unrelated, "sentinel"), "KEEP\n");
+    symlinkSync("sentinel", join(unrelated, "sentinel-link"));
+    write(join(f.agent, "npm", "node_modules", "pi-web-search", "sentinel"), "REBUILD\n");
+    write(join(f.agent, "npm", "package.json"), JSON.stringify({ dependencies: { "unrelated-package": "1.0.0" } }));
+
+    const result = spawnSync("/bin/bash", ["-c", [
+      "set -euo pipefail",
+      copyExisting,
+      prepare,
+      'PACKAGE_ROLLBACK_NEEDED=0',
+      'prepare_package_transaction',
+    ].join("\n")], {
+      env: { ...process.env, AGENT_DIR: f.agent, RUNTIME_BACKUP: runtimeBackup },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(f.agent, "npm", "node_modules", "unrelated-package", "sentinel"), "utf8"), "KEEP\n");
+    assert.equal(lstatSync(join(f.agent, "npm", "node_modules", "unrelated-package", "sentinel-link")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(f.agent, "npm", "node_modules", "pi-web-search")), false, "managed package was not staged for reconstruction");
+    assert.equal(readFileSync(join(runtimeBackup, "pi-npm", "node_modules", "unrelated-package", "sentinel"), "utf8"), "KEEP\n");
+    assert.equal(lstatSync(join(runtimeBackup, "pi-npm", "node_modules", "unrelated-package", "sentinel-link")).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(runtimeBackup, "pi-npm", "node_modules", "pi-web-search", "sentinel"), "utf8"), "REBUILD\n");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("I8 failed reconciliation restores the complete original npm store", () => {
+  const f = fixture();
+  try {
+    const source = readFileSync(installer, "utf8");
+    const copyExisting = source.slice(source.indexOf("copy_existing() {"), source.indexOf("\nprune_managed_backups() {"));
+    const restore = source.slice(source.indexOf("restore_packages() {"), source.indexOf("\npackages_ready() {"));
+    const prepare = source.slice(source.indexOf("prepare_package_transaction() {"), source.indexOf('\nif [ "$MODE" = "full" ]; then\n  RUNTIME_BACKUP='));
+    const runtimeBackup = join(f.home, "transaction");
+    mkdirSync(runtimeBackup);
+    const npmStore = join(f.agent, "npm");
+    write(join(npmStore, "package.json"), "{\"name\":\"synthetic-store\"}\n", 0o640);
+    write(join(npmStore, "node_modules", "unrelated-package", "sentinel"), "ORIGINAL\n");
+    symlinkSync("sentinel", join(npmStore, "node_modules", "unrelated-package", "sentinel-link"));
+
+    const result = spawnSync("/bin/bash", ["-c", [
+      "set -euo pipefail",
+      copyExisting,
+      restore,
+      prepare,
+      "PACKAGE_ROLLBACK_NEEDED=0",
+      "prepare_package_transaction",
+      'printf "MUTATED\\n" > "$AGENT_DIR/npm/package.json"',
+      'rm -f "$AGENT_DIR/npm/node_modules/unrelated-package/sentinel"',
+      'printf "NEW\\n" > "$AGENT_DIR/npm/new-entry"',
+      "restore_packages",
+    ].join("\n")], {
+      env: { ...process.env, AGENT_DIR: f.agent, RUNTIME_BACKUP: runtimeBackup },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(npmStore, "package.json"), "utf8"), "{\"name\":\"synthetic-store\"}\n");
+    assert.equal(statSync(join(npmStore, "package.json")).mode & 0o777, 0o640);
+    assert.equal(readFileSync(join(npmStore, "node_modules", "unrelated-package", "sentinel"), "utf8"), "ORIGINAL\n");
+    assert.equal(lstatSync(join(npmStore, "node_modules", "unrelated-package", "sentinel-link")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(npmStore, "new-entry")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("I12 retention prunes only future-marked expired managed backups", () => {
+  const f = fixture();
+  try {
+    const source = readFileSync(installer, "utf8");
+    const prune = source.slice(source.indexOf("prune_managed_backups() {"), source.indexOf("\nrestore_config() {"));
+    assert.match(source, /printf '%s\\n' "\$BACKUP_MARKER_VALUE" > "\$BACKUP\/\$BACKUP_MARKER"/);
+    const successTail = source.slice(source.lastIndexOf("PACKAGE_ROLLBACK_NEEDED=0"));
+    assert.match(successTail, /prune_managed_backups/);
+    const state = join(f.home, ".local", "state", "pi-setup");
+    const unmarked = join(state, "backups", "legacy-unmarked");
+    const expired = join(state, "backups", "future-expired");
+    const fresh = join(state, "backups", "future-fresh");
+    for (const dir of [unmarked, expired, fresh]) {
+      mkdirSync(dir, { recursive: true });
+      write(join(dir, "sentinel"), "KEEP\n");
+    }
+    const marker = ".pi-setup-managed-backup-v1";
+    const markerValue = "pi-setup-managed-config-backup-v1";
+    for (const dir of [expired, fresh]) write(join(dir, marker), `${markerValue}\n`);
+    const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    utimesSync(join(expired, marker), old, old);
+
+    const result = spawnSync("/bin/bash", ["-c", `set -euo pipefail\n${prune}\nprune_managed_backups`], {
+      env: {
+        ...process.env,
+        STATE_DIR: state,
+        BACKUP_MARKER: marker,
+        BACKUP_MARKER_VALUE: markerValue,
+        BACKUP_RETENTION_DAYS: "30",
+      },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(unmarked), true, "legacy unmarked backup was adopted or deleted");
+    assert.equal(existsSync(expired), false);
+    assert.equal(existsSync(fresh), true);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("failed apply restores existing paths and removes newly introduced paths", () => {
   const f = fixture();
   try {
@@ -334,7 +532,7 @@ test("failed apply restores existing paths and removes newly introduced paths", 
     assert.equal(readFileSync(join(f.agent, "AGENTS.md"), "utf8"), "previous agents\n");
     assert.equal(readFileSync(join(f.agent, "settings.json"), "utf8"), "{\"previous\":true}\n");
     assert.equal(readFileSync(join(f.agent, "auth.json"), "utf8"), "AUTH-STAYS\n");
-    for (const rel of ["scrub-session-secrets.sh", "extensions", "skills", "prompts"]) {
+    for (const rel of ["zentui.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts", "agents"]) {
       assert.equal(existsSync(join(f.agent, rel)), false, `${rel} should remain absent after rollback`);
     }
   } finally {

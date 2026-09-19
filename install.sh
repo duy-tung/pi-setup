@@ -5,12 +5,11 @@ umask 077
 
 NODE_VERSION="24.15.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent"
-PI_VERSION="0.84.4"
-OAUTH_COMMIT="1996fbbc3f0a8a3d3e36fc4ac4f4d1bb871d5d49"
+PI_VERSION="0.85.1"
 OAUTH_REWRITE_MODE="technical-safe"
-WEB_SEARCH_PATCH="pi-web-search-oauth-system.patch"
-WEB_SEARCH_PATCH_TARGET="src/api.ts"
-WEB_SEARCH_PATCHED_SHA256="f95b42a015a6b04cdc9bfb5a06f8cf4d1554e9482312180c783f0fa7241cf102"
+BACKUP_RETENTION_DAYS=30
+BACKUP_MARKER=".pi-setup-managed-backup-v1"
+BACKUP_MARKER_VALUE="pi-setup-managed-config-backup-v1"
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 MANIFEST="$ROOT/scripts/managed-paths.txt"
@@ -18,7 +17,13 @@ HOME_REAL="$(CDPATH= cd -- "$HOME" && pwd -P)"
 PI_ROOT="$HOME_REAL/.pi"
 AGENT_DIR="$PI_ROOT/agent"
 STATE_DIR="$HOME_REAL/.local/state/pi-setup"
-MISE_CONFIG="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME_REAL/.config}/mise/config.toml}"
+if [ -n "${MISE_GLOBAL_CONFIG_FILE:-}" ]; then
+  MISE_CONFIG="$MISE_GLOBAL_CONFIG_FILE"
+elif [ -n "${MISE_CONFIG_DIR:-}" ]; then
+  MISE_CONFIG="${MISE_CONFIG_DIR%/}/config.toml"
+else
+  MISE_CONFIG="${XDG_CONFIG_HOME:-$HOME_REAL/.config}/mise/config.toml"
+fi
 MODE="full"
 MISE=""
 STAGE=""
@@ -29,6 +34,8 @@ PI_WAS_PRESENT=0
 CONFIG_ROLLBACK_NEEDED=0
 RUNTIME_ROLLBACK_NEEDED=0
 PACKAGE_ROLLBACK_NEEDED=0
+FINISHING=0
+SIGNAL_DURING_FINISH=0
 
 usage() {
   cat <<'EOF'
@@ -53,7 +60,7 @@ case "${1:-}" in
 esac
 [ "$#" -le 1 ] || { usage >&2; exit 2; }
 
-[ "$(uname -s)" = "Darwin" ] || die "this installer supports macOS only; Bash Seatbelt semantics would differ on this OS"
+[ "$(uname -s)" = "Darwin" ] || die "this installer is verified on macOS only"
 [ ! -L "$PI_ROOT" ] || die "$PI_ROOT must be a real directory, not a symlink"
 [ ! -L "$AGENT_DIR" ] || die "$AGENT_DIR must be a real directory, not a symlink"
 [ -f "$MANIFEST" ] || die "missing managed-path manifest: $MANIFEST"
@@ -65,12 +72,56 @@ command -v shasum >/dev/null 2>&1 || die "shasum is required"
 # shellcheck source=scripts/operation-lock.sh
 . "$ROOT/scripts/operation-lock.sh"
 acquire_operation_lock "$STATE_DIR" || exit 1
-trap 'release_operation_lock' EXIT
+
+handle_signal() {
+  signal_code="$1"
+  if [ "$FINISHING" -eq 1 ]; then
+    SIGNAL_DURING_FINISH="$signal_code"
+    return 0
+  fi
+  exit "$signal_code"
+}
+
+finish() {
+  code=$?
+  [ "$FINISHING" -eq 0 ] || return 0
+  FINISHING=1
+  rollback_failed=0
+  set +e
+  if [ "$code" -ne 0 ]; then
+    if [ "$PACKAGE_ROLLBACK_NEEDED" -eq 1 ]; then restore_packages || rollback_failed=1; fi
+    if [ "$CONFIG_ROLLBACK_NEEDED" -eq 1 ]; then restore_config || rollback_failed=1; fi
+    if [ "$RUNTIME_ROLLBACK_NEEDED" -eq 1 ]; then restore_runtime || rollback_failed=1; fi
+    if [ "$SIGNAL_DURING_FINISH" -ne 0 ]; then
+      rollback_failed=1
+      printf 'pi-setup: CRITICAL: signal %s arrived during cleanup; verify rollback before removing preserved state\n' "$SIGNAL_DURING_FINISH" >&2
+    fi
+    if [ "$rollback_failed" -ne 0 ]; then
+      printf 'pi-setup: CRITICAL: rollback was incomplete; preserve managed backup %s and runtime transaction %s\n' "${BACKUP:-<none>}" "${RUNTIME_BACKUP:-<none>}" >&2
+    elif [ -n "$RUNTIME_BACKUP" ]; then
+      rm -rf -- "$RUNTIME_BACKUP" || rollback_failed=1
+    fi
+  fi
+  if [ -n "$STAGE" ] && ! rm -rf -- "$STAGE"; then
+    printf 'pi-setup: CRITICAL: unable to remove staging directory %s\n' "$STAGE" >&2
+    [ "$code" -ne 0 ] || code=1
+  fi
+  if ! release_operation_lock; then
+    printf '%s\n' 'pi-setup: CRITICAL: unable to release operation lock' >&2
+    [ "$code" -ne 0 ] || code=1
+  fi
+  if [ "$code" -eq 0 ] && [ "$SIGNAL_DURING_FINISH" -ne 0 ]; then code="$SIGNAL_DURING_FINISH"; fi
+  trap - EXIT INT TERM HUP
+  exit "$code"
+}
+trap finish EXIT
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM HUP
 
 if [ "$MODE" = "full" ]; then
   case "$MISE_CONFIG" in
     /*) ;;
-    *) die "MISE_GLOBAL_CONFIG_FILE/XDG_CONFIG_HOME must resolve to an absolute global config path" ;;
+    *) die "MISE_GLOBAL_CONFIG_FILE/MISE_CONFIG_DIR/XDG_CONFIG_HOME must resolve to an absolute global config path" ;;
   esac
   for package_path in \
     "$AGENT_DIR/npm" \
@@ -103,7 +154,7 @@ run_node() {
 
 validate_rel() {
   case "$1" in
-    AGENTS.md|settings.json|scrub-session-secrets.sh|extensions|skills|prompts) ;;
+    AGENTS.md|settings.json|zentui.json|scrub-session-secrets.sh|extensions|skills|prompts|agents) ;;
     *) die "unexpected managed path in manifest: $1" ;;
   esac
 }
@@ -152,8 +203,15 @@ const p = process.argv[1];
 const s = JSON.parse(fs.readFileSync(p, "utf8"));
 const expected = [
   "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
-  "npm:pi-web-search@1.3.1",
-  { source: "npm:@upstash/context7-pi@0.1.2", skills: [] },
+  "npm:pi-web-search@1.4.0",
+  "npm:@upstash/context7-pi@0.1.2",
+  "npm:@juicesharp/rpiv-ask-user-question@2.9.0",
+  "npm:@juicesharp/rpiv-todo@2.9.0",
+  "npm:@tintinweb/pi-subagents@0.19.0",
+  "npm:pi-zentui@0.22.3",
+  "npm:@juicesharp/rpiv-advisor@2.9.0",
+  { source: "npm:pi-background-tasks@2.5.0", extensions: ["extensions/background-tasks.ts"] },
+  "npm:@firstpick/pi-themes-bundle@0.1.6",
 ];
 const defaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(s.npmCommand) !== JSON.stringify(["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"])) throw new Error("portable npmCommand mismatch");
@@ -168,12 +226,16 @@ same_path() {
   [ -e "$dst" ] || [ -L "$dst" ] || return 1
   [ ! -L "$dst" ] || return 1
   if [ -d "$src" ] && [ -d "$dst" ]; then
-    changes="$(rsync -ainc --delete "$src/" "$dst/")" || return 1
+    # Itemize every real drift, but not mtimes (a fresh Git checkout changes those).
+    changes="$(rsync -ainc --delete --out-format='%i' "$src/" "$dst/" | awk '!/^\.[fd]\.\.[tT]\.+$/ && NF')" || return 1
     [ -z "$changes" ]
     return
   fi
   [ -f "$src" ] && [ -f "$dst" ] || return 1
-  cmp -s "$src" "$dst" || return 1
+  case "${src##*/}" in
+    settings.json|zentui.json) run_node "$ROOT/scripts/json-equal.mjs" "$src" "$dst" || return 1 ;;
+    *) cmp -s "$src" "$dst" || return 1 ;;
+  esac
   [ "$(stat -f '%Lp' "$src")" = "$(stat -f '%Lp' "$dst")" ]
 }
 
@@ -196,6 +258,21 @@ copy_existing() {
   else
     cp -pP "$src" "$dst"
   fi
+}
+
+prune_managed_backups() {
+  # Retention is future-only. Legacy/unmarked backups are never adopted or removed.
+  for marker in "$STATE_DIR"/backups/*/"$BACKUP_MARKER"; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    marker_value="$(cat "$marker" 2>/dev/null || true)"
+    [ "$marker_value" = "$BACKUP_MARKER_VALUE" ] || continue
+    if [ -n "$(find "$marker" -prune -mtime "+$BACKUP_RETENTION_DAYS" -print 2>/dev/null || true)" ]; then
+      backup_dir="${marker%/*}"
+      if ! rm -rf -- "$backup_dir"; then
+        printf 'pi-setup: warning: unable to prune expired managed backup %s\n' "$backup_dir" >&2
+      fi
+    fi
+  done
 }
 
 restore_config() {
@@ -262,19 +339,7 @@ restore_packages() {
 }
 
 packages_ready() {
-  oauth_store="$AGENT_DIR/git/github.com/duy-tung/pi-anthropic-oauth-plus"
-  web_meta="$AGENT_DIR/npm/node_modules/pi-web-search/package.json"
-  context_meta="$AGENT_DIR/npm/node_modules/@upstash/context7-pi/package.json"
-  [ -d "$oauth_store/.git" ] || return 1
-  [ "$(git -C "$oauth_store" rev-parse HEAD 2>/dev/null || true)" = "$OAUTH_COMMIT" ] || return 1
-  [ -z "$(git -C "$oauth_store" status --porcelain --untracked-files=all 2>/dev/null || printf dirty)" ] || return 1
-  [ -f "$web_meta" ] && [ -f "$context_meta" ] || return 1
-  versions="$(run_node -e '
-const fs = require("node:fs");
-for (const p of process.argv.slice(1)) process.stdout.write(`${JSON.parse(fs.readFileSync(p, "utf8")).version}\n`);
-' "$web_meta" "$context_meta")" || return 1
-  [ "$versions" = "1.3.1
-0.1.2" ]
+  run_node "$ROOT/scripts/package-health.mjs" "$AGENT_DIR"
 }
 
 prepare_package_transaction() {
@@ -284,6 +349,22 @@ prepare_package_transaction() {
   : > "$RUNTIME_BACKUP/.npm-store-transaction"
   if [ -e "$npm_store" ] || [ -L "$npm_store" ]; then
     mv "$npm_store" "$RUNTIME_BACKUP/pi-npm"
+    # Reconcile managed pins in a copy of the prior store. npm/pi can update
+    # those pins while unrelated user-installed entries remain transactionally
+    # protected by the untouched original in RUNTIME_BACKUP.
+    copy_existing "$RUNTIME_BACKUP/pi-npm" "$npm_store"
+    # Force the managed npm packages to be reconstructed while leaving all
+    # unrelated package entries and shared dependencies in the working copy.
+    rm -rf -- \
+      "$npm_store/node_modules/pi-web-search" \
+      "$npm_store/node_modules/@upstash/context7-pi" \
+      "$npm_store/node_modules/@juicesharp/rpiv-ask-user-question" \
+      "$npm_store/node_modules/@juicesharp/rpiv-todo" \
+      "$npm_store/node_modules/@tintinweb/pi-subagents" \
+      "$npm_store/node_modules/pi-background-tasks" \
+      "$npm_store/node_modules/pi-zentui" \
+      "$npm_store/node_modules/@juicesharp/rpiv-advisor" \
+      "$npm_store/node_modules/@firstpick/pi-themes-bundle"
   else
     : > "$RUNTIME_BACKUP/.npm-store-absent"
   fi
@@ -294,56 +375,6 @@ prepare_package_transaction() {
     : > "$RUNTIME_BACKUP/.oauth-store-absent"
   fi
 }
-
-file_sha256() {
-  shasum -a 256 "$1" | awk '{ print $1 }'
-}
-
-# Published packages that need a local source fix carry a patch under patches/.
-# The pinned post-image checksum is the applied marker, so reruns are no-ops and
-# a partially applied or upstream-changed tree fails loudly instead of silently.
-# `patch` runs with --batch --forward so it never prompts and never silently
-# reverses an already-applied hunk; it refuses instead, which the checksum
-# short-circuit above has already handled.
-apply_package_patch() {
-  patch_name="$1"
-  target_dir="$2"
-  target_rel="$3"
-  expected_sha="$4"
-  patch_file="$ROOT/patches/$patch_name"
-  [ -f "$patch_file" ] || die "missing package patch: patches/$patch_name"
-  [ -f "$target_dir/$target_rel" ] || die "package patch target is missing: $target_dir/$target_rel"
-  if [ "$(file_sha256 "$target_dir/$target_rel")" = "$expected_sha" ]; then return 0; fi
-  patch -p1 -s --batch --forward --dry-run -d "$target_dir" < "$patch_file" >/dev/null 2>&1 \
-    || die "package patch no longer applies to the installed source: patches/$patch_name"
-  patch -p1 -s --batch --forward -d "$target_dir" < "$patch_file" || die "unable to apply package patch: patches/$patch_name"
-  [ "$(file_sha256 "$target_dir/$target_rel")" = "$expected_sha" ] \
-    || die "patched source does not match its pinned checksum: patches/$patch_name"
-}
-
-finish() {
-  code=$?
-  trap - EXIT INT TERM HUP
-  rollback_failed=0
-  if [ "$code" -ne 0 ]; then
-    set +e
-    if [ "$PACKAGE_ROLLBACK_NEEDED" -eq 1 ]; then restore_packages || rollback_failed=1; fi
-    if [ "$CONFIG_ROLLBACK_NEEDED" -eq 1 ]; then restore_config || rollback_failed=1; fi
-    if [ "$RUNTIME_ROLLBACK_NEEDED" -eq 1 ]; then restore_runtime || rollback_failed=1; fi
-    set -e
-    if [ "$rollback_failed" -ne 0 ]; then
-      printf 'pi-setup: CRITICAL: rollback was incomplete; preserve managed backup %s and runtime transaction %s\n' "${BACKUP:-<none>}" "${RUNTIME_BACKUP:-<none>}" >&2
-    elif [ -n "$RUNTIME_BACKUP" ]; then
-      rm -rf "$RUNTIME_BACKUP"
-    fi
-  fi
-  [ -z "$STAGE" ] || rm -rf "$STAGE"
-  release_operation_lock
-  exit "$code"
-}
-trap finish EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
 
 if [ "$MODE" = "full" ]; then
   RUNTIME_BACKUP="$(mktemp -d "$STATE_DIR/transactions/install.XXXXXX")"
@@ -375,6 +406,7 @@ if [ "$CHANGED" -eq 1 ]; then
   stamp="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
   BACKUP="$STATE_DIR/backups/$stamp"
   mkdir -p "$BACKUP"
+  printf '%s\n' "$BACKUP_MARKER_VALUE" > "$BACKUP/$BACKUP_MARKER"
   : > "$BACKUP/.present"
   while IFS= read -r rel || [ -n "$rel" ]; do
     [ -n "$rel" ] || continue
@@ -396,22 +428,32 @@ else
 fi
 
 if [ "$MODE" = "full" ]; then
+  PATCH_ACTION="--check"
   if packages_ready; then
     printf '%s\n' "==> Pinned Pi package stores already match"
   else
+    PATCH_ACTION="--apply"
     printf '%s\n' "==> Reconciling pinned Pi packages transactionally"
     prepare_package_transaction
     for spec in \
       "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2" \
-      "npm:pi-web-search@1.3.1" \
-      "npm:@upstash/context7-pi@0.1.2"
+      "npm:pi-web-search@1.4.0" \
+      "npm:@upstash/context7-pi@0.1.2" \
+      "npm:@juicesharp/rpiv-ask-user-question@2.9.0" \
+      "npm:@juicesharp/rpiv-todo@2.9.0" \
+      "npm:@tintinweb/pi-subagents@0.19.0" \
+      "npm:pi-background-tasks@2.5.0" \
+      "npm:pi-zentui@0.22.3" \
+      "npm:@juicesharp/rpiv-advisor@2.9.0" \
+      "npm:@firstpick/pi-themes-bundle@0.1.6"
     do
       "$MISE" -C / exec "node@$NODE_VERSION" -- pi install "$spec" --no-approve
     done
+    # pi install may normalize object-form resources; restore our exact filters.
+    cp -p "$ROOT/settings.json" "$AGENT_DIR/settings.json"
   fi
-  printf '%s\n' "==> Applying pinned package patches"
-  apply_package_patch "$WEB_SEARCH_PATCH" "$AGENT_DIR/npm/node_modules/pi-web-search" \
-    "$WEB_SEARCH_PATCH_TARGET" "$WEB_SEARCH_PATCHED_SHA256"
+  printf '%s\n' "==> Applying or verifying pinned package patches"
+  run_node "$ROOT/scripts/package-patches.mjs" "$PATCH_ACTION" "$AGENT_DIR"
   "$ROOT/doctor.sh"
 else
   "$ROOT/doctor.sh" --config-only
@@ -421,6 +463,7 @@ CONFIG_ROLLBACK_NEEDED=0
 RUNTIME_ROLLBACK_NEEDED=0
 PACKAGE_ROLLBACK_NEEDED=0
 if [ -n "$RUNTIME_BACKUP" ]; then rm -rf "$RUNTIME_BACKUP"; fi
+prune_managed_backups
 printf '%s\n' "==> Pi setup complete"
 if ! command -v pi >/dev/null 2>&1; then
   printf '%s\n' "Note: activate mise in your shell, then open a new shell before running pi."

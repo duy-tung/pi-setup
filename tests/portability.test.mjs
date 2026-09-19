@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const managed = ["AGENTS.md", "settings.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts"];
+const managed = ["AGENTS.md", "settings.json", "zentui.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts", "agents"];
 
 function symlinks(path, out = []) {
   const stat = lstatSync(path);
@@ -109,9 +109,20 @@ test("settings pin the runtime package manager, default tools, and every externa
   assert.deepEqual(settings.npmCommand, ["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"]);
   assert.deepEqual(settings.packages, [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
-    "npm:pi-web-search@1.3.1",
-    { source: "npm:@upstash/context7-pi@0.1.2", skills: [] },
+    "npm:pi-web-search@1.4.0",
+    "npm:@upstash/context7-pi@0.1.2",
+    "npm:@juicesharp/rpiv-ask-user-question@2.9.0",
+    "npm:@juicesharp/rpiv-todo@2.9.0",
+    "npm:@tintinweb/pi-subagents@0.19.0",
+    "npm:pi-zentui@0.22.3",
+    "npm:@juicesharp/rpiv-advisor@2.9.0",
+    { source: "npm:pi-background-tasks@2.5.0", extensions: ["extensions/background-tasks.ts"] },
+    "npm:@firstpick/pi-themes-bundle@0.1.6",
   ]);
+  assert.equal(settings.defaultProvider, "openai-codex");
+  assert.equal(settings.defaultModel, "gpt-6-astra");
+  assert.equal(settings.defaultThinkingLevel, "high");
+  assert.equal(settings.theme, "catppuccin-mocha");
   assert.deepEqual(settings.defaultTools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
   const mise = readFileSync(join(root, "mise.toml"), "utf8");
@@ -146,7 +157,7 @@ test("tree-rewind is a bundled Pi package rather than an external link", () => {
   assert.equal(stat.isSymbolicLink(), false);
   const pkg = JSON.parse(readFileSync(join(path, "package.json"), "utf8"));
   assert.equal(pkg.name, "pi-tree-rewind");
-  assert.equal(pkg.version, "0.3.1");
+  assert.equal(pkg.version, "0.4.1");
   assert.deepEqual(pkg.pi.extensions, ["./src/index.ts"]);
 });
 
@@ -156,7 +167,7 @@ test("installer rebuilds transactional package stores from every exact pin", () 
   assert.equal(source.includes("pi update --extensions"), false);
   for (const spec of [
     "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
-    "npm:pi-web-search@1.3.1",
+    "npm:pi-web-search@1.4.0",
     "npm:@upstash/context7-pi@0.1.2",
   ]) {
     assert.equal(source.includes(`"${spec}"`), true, `missing installer pin ${spec}`);
@@ -166,8 +177,20 @@ test("installer rebuilds transactional package stores from every exact pin", () 
 test("doctor requires exact package-spec lines rather than version prefixes", () => {
   const source = readFileSync(join(root, "doctor.sh"), "utf8");
   assert.match(source, /grep -Fxq "  \$spec"/);
-  assert.match(source, /"  \$context7_spec \(filtered\)"/);
+  assert.match(source, /grep -Fxq "  \$context7_spec"/);
+  assert.equal(source.includes('$context7_spec (filtered)'), false);
   assert.equal(source.includes('grep -Fq "$spec"'), false);
+});
+
+test("portable agent definitions keep the configured reviewer and advisor exclusions", () => {
+  assert.deepEqual(readdirSync(join(root, "agents")).sort(), ["Explore.md", "Plan.md", "final-reviewer.md", "general-purpose.md"].sort());
+  const reviewer = readFileSync(join(root, "agents/final-reviewer.md"), "utf8");
+  assert.match(reviewer, /^model: openai-codex\/gpt-6-astra$/m);
+  assert.match(reviewer, /^thinking: max$/m);
+  assert.match(reviewer, /^tools: read, grep, find, ls$/m);
+  for (const name of ["Explore", "Plan", "general-purpose"]) {
+    assert.match(readFileSync(join(root, "agents", name + ".md"), "utf8"), /^exclude_extensions: rpiv-advisor$/m);
+  }
 });
 
 test("gitignore blocks Pi runtime state and credential-shaped files", () => {

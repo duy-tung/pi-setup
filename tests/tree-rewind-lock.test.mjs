@@ -41,6 +41,22 @@ test("an old lock owned by a live local pid is never stolen", async () => {
   }
 });
 
+test("lock timeout bounds acquisition only, not work while the lock is held", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-rewind-lock-hold-"));
+  const lock = join(dir, "snapshot.lock");
+  try {
+    const started = Date.now();
+    const value = await withLock(lock, async () => {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      return "finished";
+    }, { timeoutMs: 10 });
+    assert.equal(value, "finished");
+    assert.ok(Date.now() - started >= 60);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a former holder never removes a successor lock", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-rewind-lock-owner-"));
   const lock = join(dir, "snapshot.lock");
@@ -70,31 +86,34 @@ test("signal handlers exist only while at least one lock is held", async () => {
   }
 });
 
-test("SIGTERM terminates a rewind lock holder instead of continuing unlocked", async () => {
+test("standalone SIGTERM drains the writer without allowing unlocked continuation", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-rewind-lock-signal-"));
   const lock = join(dir, "snapshot.lock");
-  const lockModule = pathToFileURL(join(root, "extensions", "tree-rewind", "src", "lock.ts")).href;
+  const lockModule = pathToFileURL(process.env.REWIND_TEST_LOCK_MODULE ?? join(root, "extensions", "tree-rewind", "src", "lock.ts")).href;
   const source = `
+    import { existsSync } from "node:fs";
     import { withLock } from ${JSON.stringify(lockModule)};
     await withLock(${JSON.stringify(lock)}, async () => {
       process.stdout.write("held\\n");
-      await new Promise((resolve) => setTimeout(resolve, 10_000));
-      process.stdout.write("continued-after-SIGTERM\\n");
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      if (!existsSync(${JSON.stringify(lock)})) throw new Error("writer continued unlocked");
+      process.stdout.write("continued-under-lock\\n");
     });
   `;
-  const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", source], {
+  const child = spawn(process.execPath, ["--experimental-strip-types", "--import", join(root, "extensions/tree-rewind/spike/register.mjs"), "--input-type=module", "-e", source], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk.toString(); });
   try {
     await waitForText(child, "held");
-    const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    const exited = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
     child.kill("SIGTERM");
+    await assert.rejects(withLock(lock, async () => {}, { timeoutMs: 30 }), LockTimeout);
     const result = await exited;
     assert.equal(result.code, 143);
     assert.equal(result.signal, null);
-    assert.equal(output.includes("continued-after-SIGTERM"), false);
+    assert.equal(output.includes("continued-under-lock"), true);
 
     let acquired = false;
     await withLock(lock, async () => { acquired = true; }, { timeoutMs: 1000, staleMs: 1000 });

@@ -1,19 +1,300 @@
 --- a/src/api.ts
 +++ b/src/api.ts
-@@ -845,9 +845,16 @@
+@@ -1,6 +1,6 @@
+ import type { ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
+ import type { Api, Model } from "@earendil-works/pi-ai";
+-import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
++import { clampThinkingLevel, getEnvApiKey } from "@earendil-works/pi-ai/compat";
+ import { TextEncoder, TextDecoder } from "util";
+ 
+ // --- Provider Configuration ---
+@@ -694,8 +694,12 @@
+         stream: true,
+         store: false,
+     };
+-    if (model.reasoning) {
+-        requestBody.reasoning = { effort: "none" };
++    if (model.reasoning && ctx.thinkingLevel !== undefined) {
++        // Read the live session effort on every call and use Pi's model capability
++        // map, just like its native provider. Astra cannot accept a hard-coded none.
++        const level = clampThinkingLevel(model, ctx.thinkingLevel);
++        const effort = model.thinkingLevelMap?.[level] ?? (level === "off" ? "none" : level);
++        requestBody.reasoning = { effort };
+     }
+     if (isCodex) {
+         requestBody.instructions = "Answer the user's request using web search when needed.";
+@@ -881,7 +885,7 @@
+             headers["anthropic-beta"] = headers["anthropic-beta"]
+                 ? `${headers["anthropic-beta"]},claude-code-20250219,oauth-2025-04-20`
+                 : "claude-code-20250219,oauth-2025-04-20";
+-            headers["user-agent"] = headers["user-agent"] || "claude-cli/2.1.75";
++            headers["user-agent"] = headers["user-agent"] || "claude-cli/2.1.261";
+             headers["x-app"] = headers["x-app"] || "cli";
+         } else if (!headers["x-api-key"] && !headers["X-Api-Key"]) {
+             headers["x-api-key"] = auth.apiKey;
+@@ -889,24 +893,20 @@
      }
  
      const maxTokens = Math.min(Math.max(1024, Math.floor(model.maxTokens / 3) || 4096), 8192);
+-    const requestBody = {
 +    // Claude Pro/Max OAuth tokens are only accepted when the first system block is
 +    // the Claude Code identity. Without it api.anthropic.com answers 429
 +    // rate_limit_error (generic "Error", no anthropic-ratelimit-* headers) even
 +    // when the subscription is nowhere near its limit.
-     const requestBody = {
++    const requestBody: any = {
          model: model.id,
          max_tokens: maxTokens,
 +        ...(isOAuth
 +            ? { system: [{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." }] }
 +            : {}),
          messages: [{ role: "user", content: prompt }],
-         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }],
+-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }],
++        tools: [{ type: "web_search_20260318", name: "web_search", max_uses: 10, response_inclusion: "full" }],
          stream: true,
+     };
+-
+-    const response = await fetch(resolveAnthropicMessagesUrl(model.baseUrl), {
+-        method: "POST",
+-        headers,
+-        body: JSON.stringify(requestBody),
+-        signal
+-    });
+-
+-    if (!response.ok) {
+-        throw new Error(`Anthropic API error (${response.status}): ${await response.text()}`);
+-    }
+ 
+     let accumulatedText = "";
+     const citations: Array<{ citedText?: string; title: string; url: string }> = [];
+@@ -928,69 +928,165 @@
+         });
+     };
+ 
+-    await readSseEvents(response, signal, ({ data: event }) => {
+-        if (event.type === "content_block_start") {
+-            const block = event.content_block;
+-            if (block?.type === "text" && block.text) {
+-                accumulatedText += block.text;
+-                onUpdate?.({ content: [{ type: "text", text: accumulatedText }], details: { streaming: true } });
+-            } else if (block?.type === "server_tool_use" && block.name === "web_search") {
+-                pushNativeSearchEvent(nativeSearchEvents, "anthropic.content_block_start.server_tool_use.web_search");
+-                nativeSearchCalls.push({
+-                    id: block.id,
+-                    provider: "anthropic",
+-                    status: "in_progress",
+-                    actionType: block.name,
+-                    queries: typeof block.input?.query === "string" ? [block.input.query] : undefined,
+-                    raw: block,
+-                });
+-                onUpdate?.({
+-                    content: [{ type: "text", text: accumulatedText || "Searching the web with Anthropic..." }],
+-                    details: { streaming: true, searching: true }
+-                });
+-            } else if (block?.type === "web_search_tool_result") {
+-                pushNativeSearchEvent(nativeSearchEvents, "anthropic.content_block_start.web_search_tool_result");
+-                const call = nativeSearchCalls.find((item) => item.id === block.tool_use_id);
+-                if (call) call.status = "completed";
+-                else nativeSearchCalls.push({ id: block.tool_use_id, provider: "anthropic", status: "completed", actionType: "web_search", raw: block });
+-                if (Array.isArray(block.content)) {
+-                    for (const result of block.content) collectSource(result, block.tool_use_id);
+-                } else if (block.content?.type === "web_search_tool_result_error") {
+-                    pushUniqueSearchResult(searchResults, {
+-                        status: block.content.error_code,
+-                        source: "anthropic.web_search_tool_result_error",
+-                        type: block.content.type,
++    let filteringFallback: string | undefined;
++    const initialMessages = requestBody.messages;
++    // Bound both pause continuations and the one possible direct-search fallback.
++    const maxRequests = 4;
++    for (let requestIndex = 0; requestIndex < maxRequests; requestIndex++) {
++        signal?.throwIfAborted();
++        const response = await fetch(resolveAnthropicMessagesUrl(model.baseUrl), {
++            method: "POST",
++            headers,
++            body: JSON.stringify(requestBody),
++            signal
++        });
++
++        if (!response.ok) {
++            throw new Error(`Anthropic API error (${response.status}): ${await response.text()}`);
++        }
++        const content: any[] = [];
++        const partialInputs = new Map<number, string>();
++        let stopReason: string | undefined;
++        let messageStopped = false;
++        let containerId: string | undefined;
++        let filteringError: string | undefined;
++        let replayable = true;
++        await readSseEvents(response, signal, ({ data: event }) => {
++            const container = event.message?.container ?? event.delta?.container ?? event.container;
++            if (typeof container?.id === "string") containerId = container.id;
++            if (event.type === "content_block_start") {
++                    const index = event.index ?? content.length;
++                    content[index] = structuredClone(event.content_block);
++                    const block = event.content_block;
++                    if (block?.type?.endsWith("code_execution_tool_result")
++                        && block.content?.type?.endsWith("tool_result_error")) {
++                        const code = block.content.error_code;
++                        if (code === "too_many_requests" || code === "unavailable" || code === "execution_time_exceeded") {
++                            filteringError = code;
++                        }
++                    }
++                } else if (event.type === "content_block_delta") {
++                    const block = content[event.index];
++                    const delta = event.delta;
++                    if (block) {
++                        if (delta?.type === "text_delta") block.text = (block.text ?? "") + delta.text;
++                        else if (delta?.type === "thinking_delta") block.thinking = (block.thinking ?? "") + delta.thinking;
++                        else if (delta?.type === "signature_delta") block.signature = (block.signature ?? "") + delta.signature;
++                        else if (delta?.type === "citations_delta") (block.citations ??= []).push(structuredClone(delta.citation));
++                        else if (delta?.type === "input_json_delta") partialInputs.set(event.index, (partialInputs.get(event.index) ?? "") + delta.partial_json);
++                        else replayable = false;
++                    } else replayable = false;
++                } else if (event.type === "content_block_stop") {
++                    const block = content[event.index];
++                    const input = partialInputs.get(event.index);
++                    if (block && input !== undefined) {
++                        try { block.input = JSON.parse(input); } catch { replayable = false; }
++                    }
++                    if (block?.type === "server_tool_use" && block.name === "web_search") {
++                        const call = nativeSearchCalls.find(item => item.id === block.id);
++                        if (call) {
++                            call.raw = block;
++                            if (typeof block.input?.query === "string") call.queries = [block.input.query];
++                        }
++                    }
++                } else if (event.type === "message_delta") {
++                    stopReason = event.delta?.stop_reason ?? stopReason;
++                } else if (event.type === "message_stop") {
++                    messageStopped = true;
++                }
++            if (event.type === "content_block_start") {
++                const block = event.content_block;
++                if (block?.type === "text" && block.text) {
++                    accumulatedText += block.text;
++                    onUpdate?.({ content: [{ type: "text", text: accumulatedText }], details: { streaming: true } });
++                } else if (block?.type === "server_tool_use" && block.name === "web_search") {
++                    pushNativeSearchEvent(nativeSearchEvents, "anthropic.content_block_start.server_tool_use.web_search");
++                    nativeSearchCalls.push({
++                        id: block.id,
++                        provider: "anthropic",
++                        status: "in_progress",
++                        actionType: block.name,
++                        queries: typeof block.input?.query === "string" ? [block.input.query] : undefined,
+                         raw: block,
+                     });
++                    onUpdate?.({
++                        content: [{ type: "text", text: accumulatedText || "Searching the web with Anthropic..." }],
++                        details: { streaming: true, searching: true }
++                    });
++                } else if (block?.type === "web_search_tool_result") {
++                    pushNativeSearchEvent(nativeSearchEvents, "anthropic.content_block_start.web_search_tool_result");
++                    const call = nativeSearchCalls.find((item) => item.id === block.tool_use_id);
++                    if (call) call.status = "completed";
++                    else nativeSearchCalls.push({ id: block.tool_use_id, provider: "anthropic", status: "completed", actionType: "web_search", raw: block });
++                    if (Array.isArray(block.content)) {
++                        for (const result of block.content) collectSource(result, block.tool_use_id);
++                    } else if (block.content?.type === "web_search_tool_result_error") {
++                        pushUniqueSearchResult(searchResults, {
++                            status: block.content.error_code,
++                            source: "anthropic.web_search_tool_result_error",
++                            type: block.content.type,
++                            raw: block,
++                        });
++                    }
+                 }
+-            }
+-        } else if (event.type === "content_block_delta") {
+-            const delta = event.delta;
+-            if (delta?.type === "text_delta") {
+-                accumulatedText += delta.text || "";
+-                onUpdate?.({
+-                    content: [{ type: "text", text: accumulatedText }],
+-                    details: { streaming: true }
+-                });
+-            } else if (delta?.type === "citations_delta") {
+-                const citation = delta.citation;
+-                if (citation?.type === "web_search_result_location" && citation.url) {
+-                    const detail = {
+-                        citedText: citation.cited_text,
+-                        title: citation.title || titleFromUrl(citation.url),
+-                        url: citation.url,
+-                        source: "anthropic.citations_delta",
+-                        type: citation.type,
+-                        raw: citation,
+-                    };
+-                    citations.push({ citedText: detail.citedText, title: detail.title, url: detail.url });
+-                    pushUniqueSearchResult(searchResults, detail);
++            } else if (event.type === "content_block_delta") {
++                const delta = event.delta;
++                if (delta?.type === "text_delta") {
++                    accumulatedText += delta.text || "";
++                    onUpdate?.({
++                        content: [{ type: "text", text: accumulatedText }],
++                        details: { streaming: true }
++                    });
++                } else if (delta?.type === "citations_delta") {
++                    const citation = delta.citation;
++                    if (citation?.type === "web_search_result_location" && citation.url) {
++                        const detail = {
++                            citedText: citation.cited_text,
++                            title: citation.title || titleFromUrl(citation.url),
++                            url: citation.url,
++                            source: "anthropic.citations_delta",
++                            type: citation.type,
++                            raw: citation,
++                        };
++                        citations.push({ citedText: detail.citedText, title: detail.title, url: detail.url });
++                        pushUniqueSearchResult(searchResults, detail);
++                    }
+                 }
++            } else if (event.type === "error") {
++                throw new Error(event.error?.message || JSON.stringify(event.error || event));
+             }
+-        } else if (event.type === "error") {
+-            throw new Error(event.error?.message || JSON.stringify(event.error || event));
++        });
++        if (!messageStopped || !stopReason) throw new Error("Anthropic search stream ended before message_stop");
++        if (stopReason === "pause_turn") {
++            if (!replayable || content.length === 0 || Array.from(content).some(block => !block)) {
++                throw new Error("Cannot replay incomplete Anthropic paused search content");
++            }
++            if (requestIndex + 1 >= maxRequests) throw new Error("Anthropic search exceeded four server requests; narrow the query");
++            requestBody.messages = [...requestBody.messages, { role: "assistant", content }];
++            if (containerId) requestBody.container = containerId;
++            onUpdate?.({ content: [{ type: "text", text: accumulatedText || "Continuing paused server-side search..." }], details: { streaming: true, searching: true } });
++            continue;
+         }
+-    });
++        if (stopReason !== "end_turn") throw new Error(`Anthropic search did not finish: ${stopReason}`);
++        if (filteringError && nativeSearchEvents.length === 0 && !filteringFallback) {
++            if (requestIndex + 1 >= maxRequests) throw new Error(`Dynamic filtering unavailable: ${filteringError}`);
++            // This is a supported caller mode of the SAME tool version, not a version downgrade.
++            filteringFallback = filteringError;
++            requestBody.tools[0].allowed_callers = ["direct"];
++            requestBody.messages = initialMessages;
++            delete requestBody.container;
++            accumulatedText = "";
++            citations.length = 0;
++            searchResults.length = 0;
++            nativeSearchCalls.length = 0;
++            onUpdate?.({ content: [{ type: "text", text: `Dynamic filtering unavailable (${filteringError}); continuing with direct web search.` }], details: { streaming: true, searching: true } });
++            continue;
++        }
++        if (filteringFallback && nativeSearchEvents.length === 0) {
++            throw new Error("Direct web search did not run after the dynamic filtering failure");
++        }
++        break;
++    }
+ 
+     const cited = applyTextCitations(accumulatedText || "No answer available.", citations);
+     const citationDetails = citations.map((citation) => ({
+@@ -1008,7 +1104,7 @@
+     const derivedSources = deriveSources(sanitizedSearchResults, sanitizedCitations);
+ 
+     return {
+-        text: cited.text,
++        text: (filteringFallback ? `[Dynamic filtering unavailable (${filteringFallback}); used direct web search with web_search_20260318.]\n\n` : "") + cited.text,
+         sources: cited.sources.length ? cited.sources.map((source) => ({ ...source, url: normalizeSearchUrl(source.url) })).filter((source) => !isLikelyJunkSearchUrl(source.url)) : derivedSources,
+         providerKind: "anthropic",
+         nativeSearchUsed: nativeSearchEvents.length > 0 || nativeSearchCalls.length > 0 || sanitizedSearchResults.length > 0,

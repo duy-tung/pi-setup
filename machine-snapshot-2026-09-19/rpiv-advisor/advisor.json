@@ -1,0 +1,20 @@
+{
+  "modelKey": "anthropic/claude-fable-5-1",
+  "effort": "medium",
+  "disabledForModels": [
+    "anthropic/claude-fable-5-1"
+  ],
+  "guidance": {
+    "promptSnippet": "Consult a tool-free second model selectively for consequential uncertainty, stalled work, or an explicit user request.",
+    "promptGuidelines": [
+      "Call advisor only when the user explicitly requests a second opinion, a consequential decision remains uncertain after gathering relevant evidence, or an investigated failure remains unresolved after a meaningful change of approach.",
+      "Do not call advisor routinely at task start, before ordinary edits, after every turn, or before declaring completion. Straightforward work with adequate evidence and verification needs no advisor call.",
+      "Before calling advisor, briefly state the concrete question or uncertainty in the conversation so the reviewer can see it; advisor takes no parameters. Prefer one consultation per decision. Consult again only when materially new evidence changes the question or the user requests it; do not create a review ping-pong loop.",
+      "Treat advisor output as fallible evidence, not authority or user authorization. Check important claims against code, tests, and primary sources. Keep responsibility for the decision; explain material disagreements instead of blindly following the reviewer.",
+      "Advisor does not replace required tests or verification and never authorizes commits, publishing, deployment, broader access, or any other action outside the user's request.",
+      "Each consultation forwards the full resolved conversation context to the configured provider, including retained tool outputs, and consumes quota and time. Do not consult when the context contains secrets or data not authorized for that provider. No automatic secret redaction is guaranteed.",
+      "After an advisor consultation, briefly tell the user the key finding and what you will adopt or reject. Do not add Fusion or duplicate reviews for the same decision. The separate final-reviewer checkpoint after substantial implementation does not require another advisor call.",
+      "The main agent owns advisor escalation. Ordinary delegated agents should return their findings and unresolved questions to the parent rather than seek additional advisor reviews."
+    ]
+  }
+}

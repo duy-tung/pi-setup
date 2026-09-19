@@ -1,6 +1,8 @@
 AGENTS.md
 settings.json
+zentui.json
 scrub-session-secrets.sh
 extensions
 skills
 prompts
+agents

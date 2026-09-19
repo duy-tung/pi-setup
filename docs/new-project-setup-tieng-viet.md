@@ -71,8 +71,9 @@ Public clone không cần GitHub login; chạy `gh auth login` trước khi tạ
 đóng/mở lại Pi để process nhận global environment rồi dùng `/login` cho provider
 cần thiết. Không copy `auth.json`, sessions, trust state, caches hoặc subagent artifacts giữa máy.
 
-Machine setup chỉ hỗ trợ macOS vì Bash confinement hiện dựa vào Seatbelt. Đây là lớp giảm tai nạn
-trong workflow có người giám sát, không phải isolation cho hostile repository.
+Machine setup chỉ hỗ trợ macOS (Homebrew, mise, rsync/launchctl trong installer). Setup không còn
+Seatbelt hay permission gate custom: Bash chạy với quyền thường của người dùng, nên cần workflow có
+người giám sát; đây không phải isolation cho hostile repository.
 
 ### 2.2. Project setup — làm riêng cho từng repository
 
@@ -575,40 +576,33 @@ git status --short
 - tool/plugin/extension config cục bộ.
 
 Chỉ chọn Trust khi repository và local resources được hiểu đủ. Với code không tin cậy, dùng
-container/VM/process isolation; permission mode và Seatbelt hiện tại không phải hostile-code sandbox.
+container/VM/process isolation riêng. Setup hiện tại không cài permission gate hoặc Seatbelt wrapper.
 
-### 14.2. Chọn permission mode có chủ ý
+### 14.2. Phạm vi thực thi
 
-```text
-/mode plan          không Bash/edit/write; block work child và unknown side effects
-/mode manual        hỏi mỗi Bash/edit/write và mỗi mutation-capable work child
-/mode accept-edits  auto edit thường, vẫn hỏi Bash/boundary/work child
-/mode auto          default low-friction, hỏi các pattern external/destructive đã biết
-/mode bypass        chỉ bỏ gate prompt tạm thời; guard vẫn còn
-```
-
-Bypass **không** phải quyền commit, push, deploy, publish hoặc xóa user work. Auto pattern cũng
-không exhaustive; global authority rules vẫn áp dụng.
+Pi dùng quyền host thông thường, kể cả ngoài cwd. Không còn các permission mode custom.
+Yêu cầu của user cho phép các bước cần thiết trong phạm vi đó; chỉ hỏi khi còn quyết định
+quan trọng hoặc khi hành động mở rộng phạm vi. Project trust vẫn kiểm soát nạp resource.
 
 ### 14.3. Một feature loop
 
 1. **Frame:** nêu outcome, constraints, source spec và success checks.
 2. **Clarify:** `/grill` nếu material decisions chưa settled.
-3. **Inspect:** đọc governing docs/code/tests; Plan mode hữu ích cho domain mới hoặc repo lạ.
+3. **Inspect:** đọc governing docs/code/tests; lập kế hoạch trước nếu domain mới hoặc repo lạ.
 4. **Plan proportionally:** task nhỏ làm inline; task nhiều bước dùng todo; long-running objective
    mới dùng goal.
 5. **Implement:** smallest complete vertical slice; giữ repository usable sau từng increment.
 6. **Delegate only when it pays:**
-   - `explore` cho local read-only high-volume;
-   - `web` cho current docs/research không đọc project;
-   - một `work` child cho scoped implementation trong trusted workspace.
+   - `Agent` với Explore cho investigation/report ngắn; yêu cầu không sửa file khi review;
+   - general-purpose cho implementation; phân chia file hoặc dùng worktree khi cần;
+   - `bg_run` cho shell job dài, không cần model riêng.
 7. **Verify child claims:** report của subagent là claim, không phải fact. Parent kiểm primary
    evidence trước khi sửa code hoặc báo Critical/Important finding.
 8. **Run project checks:** targeted trước, canonical `verify` khi scope/risk yêu cầu.
 9. **Review:** `/review <fixed-point>` cho Standards và thêm Spec khi có spec; review finding
    cũng cần verify.
-10. **Close:** inspect diff/status, update affected docs, report risk. Xin quyền riêng trước
-    commit/push/deploy/publish/delete.
+10. **Close:** inspect diff/status, update affected docs, report risk. Thực hiện các hành động
+    user đã yêu cầu; không tự thêm commit/push/deploy/publish/delete ngoài phạm vi đó.
 11. **Continue later:** `/handoff` cho unfinished multi-session work.
 
 Khi mục tiêu là học hoặc domain còn lạ, nói rõ với Pi và ưu tiên prediction/attempt, hints, review và
@@ -726,7 +720,7 @@ Chỉ mở rộng contract khi có trigger:
 - Tạo ADR/architecture docs cho mọi quyết định nhỏ.
 - Coi GitHub “not archived” là bằng chứng project active.
 - Để default branch là temporary agent branch mà không ghi lifecycle status.
-- Cho agent tự commit/push/deploy vì permission mode kỹ thuật cho phép command chạy.
+- Cho agent tự commit/push/deploy khi user chưa giao những hành động đó.
 
 ## 17. Nguồn pattern đã đối chiếu
 

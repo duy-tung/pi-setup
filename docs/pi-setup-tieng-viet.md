@@ -10,6 +10,9 @@
 > **Mục tiêu bảo mật:** giảm tai nạn trong workflow local có người giám sát; không chống
 > hostile code hoặc prompt injection.
 
+Bản hiện tại đã chuyển sang package; các pin bổ sung và thay đổi API nằm trong
+[runbook migration](./package-migration.md).
+
 Tài liệu này vận hành Pi trên máy. Khi tạo repository phần mềm mới, dùng thêm
 [guideline setup dự án mới](./new-project-setup-tieng-viet.md).
 
@@ -35,8 +38,8 @@ Installer sẽ:
 1. pin Node `24.15.0` trong global mise config;
 2. set global `PI_CACHE_RETENTION=long`;
 3. set global `PI_ANTHROPIC_OAUTH_REWRITE_MODE=technical-safe`;
-4. cài exact `@earendil-works/pi-coding-agent@0.84.4`;
-5. backup rồi áp dụng sáu resource được quản lý;
+4. cài exact `@earendil-works/pi-coding-agent@0.85.1`;
+5. backup rồi áp dụng tám resource được quản lý;
 6. cài/reconcile ba package đã pin;
 7. chạy test, tree-rewind backend suite và no-cost offline startup smoke.
 
@@ -53,10 +56,17 @@ symlink root trước mọi thay đổi để không ghi nhầm sang một cây 
 | Thành phần | Pin |
 |---|---|
 | Node | `24.15.0` qua mise |
-| Pi | `@earendil-works/pi-coding-agent@0.84.4` |
+| Pi | `@earendil-works/pi-coding-agent@0.85.1` |
 | Anthropic OAuth/cache fork | `git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2` |
-| Web search | `npm:pi-web-search@1.3.1` + `patches/pi-web-search-oauth-system.patch` |
-| Context7 | `npm:@upstash/context7-pi@0.1.2`; giữ tools và `/c7-docs`, filter package skill trùng lặp |
+| Web search | `npm:pi-web-search@1.4.0` + `patches/pi-web-search-oauth-system.patch` |
+| Context7 | `npm:@upstash/context7-pi@0.1.2`; tools, `/c7-docs`, and the on-demand `context7-docs` skill |
+| Hỏi người dùng | `npm:@juicesharp/rpiv-ask-user-question@2.9.0` |
+| Todo | `npm:@juicesharp/rpiv-todo@2.9.0` |
+| Subagents | `npm:@tintinweb/pi-subagents@0.19.0` + patch truy vấn activity cho rewind |
+| Background jobs | `npm:pi-background-tasks@2.5.0`; chỉ nạp entrypoint background-tasks ở phiên chính |
+| Zentui | `npm:pi-zentui@0.22.3`; ô nhập Accent Rail gọn, messages framed, Footer Native giữ statusline custom |
+| Advisor | `npm:@juicesharp/rpiv-advisor@2.9.0`; cấu hình riêng ngoài repo |
+| Themes | `npm:@firstpick/pi-themes-bundle@0.1.6`; cung cấp `catppuccin-mocha` |
 | tree-rewind | bundled package `extensions/tree-rewind/`, provenance `65fa4fa` |
 
 ### Patch cho package đã publish
@@ -66,12 +76,19 @@ Package publish nào cần sửa source tại chỗ thì để unified diff tron
 file đã patch — cài lại, bump version hay sửa tay làm mất patch đều fail rõ ràng thay vì
 âm thầm regress.
 
-Hiện chỉ có `patches/pi-web-search-oauth-system.patch`. `pi-web-search` gọi thẳng
+Patch OAuth là `patches/pi-web-search-oauth-system.patch` (vẫn cần trên 1.4.0).
+Ngoài ra có patch activity của pi-subagents để tích hợp rewind. `pi-web-search` gọi thẳng
 `/v1/messages` cho `web_search` native của Anthropic nhưng không gửi field `system`. Token
 OAuth Claude Pro/Max chỉ được chấp nhận khi system block đầu tiên là identity Claude Code;
 thiếu nó Anthropic trả `429 rate_limit_error` với message `"Error"` chung chung và không có
 header `anthropic-ratelimit-*` — nhìn y hệt hết quota nhưng thực chất là bị từ chối. Patch
-chỉ thêm block đó cho credential OAuth, request bằng API key giữ nguyên. Chưa báo upstream.
+thêm identity cho OAuth và cập nhật User-Agent tìm kiếm lên Claude Code 2.1.261.
+Tool Anthropic dùng `web_search_20260318`, mặc định dynamic filtering và trả đủ response.
+Nếu code execution bị giới hạn/unavailable trước khi search chạy, package thử direct search
+một lần với cùng version và báo rõ fallback. Không chuyển mode để thử lại lỗi quota search.
+`pause_turn` được tiếp tục với nguyên content mã hóa/caller/signature/container, tối đa
+bốn request; stream thiếu đoạn kết hoặc hết lượt tiếp tục sẽ báo lỗi. Cách xác thực API key
+giữ nguyên, Codex vẫn dùng `web_search`. Chưa báo upstream.
 
 `settings.json` gọi npm qua:
 
@@ -86,9 +103,11 @@ trọng `MISE_GLOBAL_CONFIG_FILE` khi user override global config path.
 
 `defaultTools` pin exact `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`. Ba dedicated
 read-only tools làm Manual/Plan search được mà không cần Bash; PowerShell không active trên
-setup macOS này. Tradeoff là thêm ba tool schema vào model context. Context7 dùng package
-object filter `skills: []`: hai tool schema và explicit `/c7-docs` vẫn còn, nhưng broad package
-skill description không lặp trong mỗi system prompt.
+setup macOS này. Tradeoff là thêm ba tool schema vào model context.
+
+Context7 loads without a resource filter: both tools, `/c7-docs`, and the `context7-docs`
+skill are enabled. Its description is available in the system prompt; full skill instructions
+load on demand for library documentation tasks.
 
 OAuth fork vẫn là dependency GitHub ngoài repo và được fetch theo tag cố định. “Một repo” ở
 đây nghĩa là chỉ cần clone một private setup repo; không vendor toàn bộ third-party packages.
@@ -104,16 +123,24 @@ process đang mở phải đóng/mở lại để nhận global env mới; `/rel
 
 ## 3. Phạm vi repo và dữ liệu private
 
-Sáu path duy nhất installer quản lý nằm trong `scripts/managed-paths.txt`:
+Tám path installer quản lý nằm trong `scripts/managed-paths.txt`:
 
 ```text
 AGENTS.md
 settings.json
+zentui.json
 scrub-session-secrets.sh
 extensions
 skills
 prompts
+agents
 ```
+
+`agents/` chứa bốn định nghĩa subagent (Explore, Plan, general-purpose, final-reviewer).
+Model/effort của final reviewer nằm trong `agents/final-reviewer.md`; cấu hình advisor nằm
+ngoài repo ở `~/.config/rpiv-advisor/advisor.json`. Model mặc định của phiên chính là
+`openai-codex/gpt-6-astra` thinking `high`, Fable 5.1 `medium`, theme `catppuccin-mocha`;
+`/fast` bật thủ công.
 
 Root `AGENTS.override.md` chỉ dành cho source repo và không nằm trong allowlist. Nó ngăn Pi
 load cùng policy hai lần từ global `~/.pi/agent/AGENTS.md` và tracked `AGENTS.md`; máy bootstrap
@@ -150,159 +177,51 @@ rollback thường không hoàn chỉnh, cảnh báo `CRITICAL` giữ lại mọ
 
 ## 4. Dùng Pi hằng ngày
 
-```bash
-cd /path/to/project
-pi
-```
+Từ migration tháng 9/2026, Pi dùng Bash/file tools với quyền host thông thường.
+Permission gate, các mode Auto/Manual/Plan/Bypass custom và Seatbelt wrapper đã bỏ.
+Project trust của Pi vẫn quyết định việc nạp tài nguyên dự án.
 
-Nên mở tại project cụ thể, không mở từ `~` hoặc `/`. Workspace rộng làm giảm giá trị của
-write policy, rewind và profile `work`.
+- `ask_user_question`: hỏi lựa chọn, preview, câu trả lời tự do.
+- `todo`, `/todos`: task có ID và dependency.
+- `Agent`, `get_subagent_result`, `steer_subagent`, `/agents`: điều phối agent.
+- `bg_run`, `/jobs`, `bg_logs`, `bg_kill`: shell job chạy nền.
+- `/goal`, `/rewind`, `/limits`, `/fast`: các tiện ích custom được giữ.
+- `/fast on|off|status`: requests `service_tier: "priority"` only on OpenAI/Codex APIs;
+  Anthropic and other providers are unchanged. Default off unless `PI_FAST_MODE=1`.
+  The badge indicates a request, not confirmed service. Pricing/credit usage and availability
+  depend on model/account. `off` restores provider defaults; reload resets the session toggle.
+  Switching to an unsupported provider suspends the override; switching back resumes it.
+- Statusline và `/limits` tự theo provider/model đang chọn: quota Anthropic hoặc Codex,
+  context capacity thực tế (ví dụ Astra 272K), phần trăm đã dùng và thời gian reset.
+  Dấu `*` báo số chưa được credential hiện tại xác nhận: hoặc refresh lỗi nên giữ số của
+  lần đọc thành công trước, hoặc số được đọc dưới credential khác; API key không có quota
+  subscription hiện `n/a`. Cache không chứa token: Codex tách theo tài khoản, Anthropic
+  tách theo provider vì token OAuth xoay mỗi giờ và không định danh tài khoản — đổi model
+  giữ lại window toàn tài khoản và chỉ bỏ bucket riêng của model cũ. Poll Anthropic gửi
+  `user-agent: claude-code/<version>` vì endpoint quota chặn theo tên agent; gặp 429 thì
+  chờ cố định 3 phút thay vì leo thang backoff.
+- `/model`, `/thinking`, `/review`, `/grill`, `/handoff`, `/teach`, `/wait-what`: tiếp tục dùng.
 
-Workflow ngắn:
+Pi tự thực hiện các bước thuộc yêu cầu, kể cả ngoài cwd; hỏi khi thiếu quyết định quan trọng
+hoặc hành động vượt phạm vi đã giao. Mở ở project giúp rewind có phạm vi checkpoint rõ ràng,
+nhưng không còn giới hạn quyền truy cập máy theo workspace.
 
-1. mô tả task bình thường; dùng `/grill` nếu quyết định chưa rõ;
-2. dùng subagent `explore` cho đọc nhiều/report ngắn, `web` cho research không đọc project,
-   `work` cho implementation độc lập trong trusted project;
-3. dùng `/review` trước merge thay đổi đáng kể;
-4. dùng `/wait-what` nếu lời giải thích khó hiểu;
-5. dùng `/handoff` trước khi dừng task chưa xong;
-6. xem preview/coverage trước `/tree` hoặc `/rewind` restore.
+Xem [chi tiết migration và rollback](./package-migration.md).
 
-`/grill` chỉ hỏi tối đa bốn material decisions mỗi round; fact nhỏ được inspect inline, còn
-`explore` child chỉ dùng cho investigation nhiều dữ liệu hoặc thực sự độc lập.
+## 5. Subagent
 
-Lệnh setup cần nhớ:
+Subagent dùng package `@tintinweb/pi-subagents@0.19.0`: background/foreground,
+steering/resume, FleetView, workflow, scheduling và worktree. Không còn ba profile OS-confined
+cũ hoặc khóa một work child. Khi review, yêu cầu agent chỉ báo cáo; đây là chỉ dẫn công việc,
+không phải bảo đảm sandbox. Không tự tạo lịch chạy nếu user chưa yêu cầu.
 
-| Lệnh | Vai trò |
-|---|---|
-| `/reload` | Nạp lại source sau khi áp dụng config |
-| `/mode` | Chọn Auto, Manual, Accept edits, Plan hoặc Bypass tạm thời |
-| `/model`, `/thinking` | Đổi model/thinking cho session hiện tại; Ctrl+S mới lưu global default |
-| `/agents` | Xem/steer/resume/interrupt RPC children |
-| `/goal`, `/todos` | Long-running goal và task checklist |
-| `/tree`, `/rewind` | Conversation tree và worktree restore |
-| `/limits` | Anthropic plan limits |
-| `/present on\|off` | Opt-in GPT presentation; mặc định off mỗi session/reload |
-| `/fast on\|off` | Anthropic fast mode; OAuth v0.3.2 giữ required betas và loại fine-grained streaming |
-| `/review`, `/grill`, `/handoff`, `/teach`, `/wait-what` | Prompt templates |
+Chọn `isolation: "worktree"` khi cần tách thay đổi; package có thể tự commit trên branch
+của child. Dữ liệu child cũ còn trong lịch sử, không resume bằng ID cũ qua package mới.
 
-### Permission mode
-
-`/mode` hoặc `Ctrl+Alt+M` mở selector năm dòng:
-
-- **Auto** (default): theo permission model của Claude Code, xem [Permission rules](#permission-rules).
-  Workspace edit và Bash thông thường chạy dưới policy/sandbox; known commit, delete, publish,
-  deploy, destructive, protected pattern sẽ hỏi, và phần lớn prompt có kèm lựa chọn thôi hỏi
-  lần sau. Rule không exhaustive, nên model vẫn phải tuân authority rules trong `AGENTS.md`.
-- **Manual**: dedicated read/search tools chạy tự do; mỗi `edit`/`write`, mỗi Bash call và
-  mỗi work-child activation đều hỏi một lần.
-- **Accept edits**: ordinary `edit`/`write` trong workspace tự chạy; Bash, protected/outside
-  write, unknown side-effect tool và work-child activation vẫn hỏi.
-- **Plan**: gỡ `bash`, `edit`, `write` khỏi active tools; chặn work child và unknown
-  side-effect tool. Khi thoát, chỉ ba tool mà Plan đã tắt được restore; tool thêm động không
-  bị mất.
-- **Bypass permissions**: phải confirm trong attended TUI và chỉ sống trong runtime hiện tại.
-  Nó bỏ gate prompt nhưng không phải authorization để commit, push, deploy, publish hoặc xoá
-  user work; `AGENTS.md` vẫn áp dụng. Seatbelt, protected/outside boundary và credential deny
-  không bị tắt.
-
-Auto/Manual/Accept edits/Plan đi theo active session branch. Bypass reset về Auto sau
-`/reload`, resume, fork hoặc session mới. Không đổi mode khi parent đang chạy; mode change và
-conversation-tree navigation đều bị chặn khi work child đang starting/running. Wait hoặc
-interrupt child trước.
-
-### Permission rules
-
-`extensions/lib/permission-rules.ts` port permission model của Claude Code. Rule có dạng
-`Tool(specifier)` — `Bash(git push *)`, `Edit(/path/**)` — chia ba tier, thứ tự ưu tiên là
-**deny > ask > allow**. `Bash(prefix *)` khớp command và mọi argument của nó; specifier path
-kết thúc bằng `/**` khớp cả subtree.
-
-Command được khớp **sau khi** bóc body heredoc và chuỗi trích dẫn, rồi tách theo `&&`/`;`/`|`
-và xét từng đoạn, đoạn nặng nhất thắng. Nhờ vậy viết một file test mà trong nội dung có chữ
-`git commit` không còn kích hoạt prompt commit nữa.
-
-| Tier | Hành vi |
-|---|---|
-| `deny` | Chặn cứng. Đọc credential (`gh auth token`, `op read`, dump keychain) và lệnh phá thiết bị (`mkfs`, `shred`, `diskutil erase`). Không thể override. |
-| `ask` | Hỏi. Phần lớn kèm **Always allow `<rule>`**, ghi một learned rule huỷ luôn default rule đã hỏi. Nhóm `NEVER_REMEMBER` — `sudo`, `git push`, publish, deploy, `shutdown` — luôn hỏi lại, vì nó ra khỏi máy này hoặc không undo được từ đây. |
-| `allow` | Im lặng. `git status`/`diff`/`log`/`show` và `gh pr view`/`diff` chỉ đọc. |
-| unmatched | Chạy trong Auto. Hỏi trong Manual và Accept edits. |
-
-Hai chỗ cố ý khác Claude Code, đều vì setup này có lớp bảo vệ mà Claude Code không có:
-
-- **Bash unmatched chạy thẳng trong Auto.** Claude Code buộc phải hỏi mọi lệnh lạ vì không có
-  gì confine nó. Ở đây `sandbox-bash.ts` cấp cho mỗi lệnh một Seatbelt profile giới hạn ghi
-  trong workspace + temp và làm credential không đọc được, còn `tree-rewind` đã checkpoint
-  workspace. Hỏi hết sẽ tốn 725 prompt lần-đầu tính trên toàn bộ session history của máy này.
-- **`rm -rf` chỉ hỏi chứ không bị deny.** Cũng nhờ hai lớp trên, một lệnh xoá đã bị confine và
-  đã có checkpoint thì khôi phục được.
-
-Auto coi working directory của session là workspace và không hỏi lại bên trong nó, giống
-Claude Code. Protected write (`~/.zshrc`, `~/.gitconfig`, `~/.pi/agent`, `.git/config` và hooks
-của project) cùng sensitive path vẫn giữ prompt riêng và chặn cứng — đó chính là thứ giữ an
-toàn khi session mở từ `$HOME`.
-
-Learned rule nằm ở `~/.local/state/pi-setup/permission-rules.json`, cố ý đặt ngoài managed
-config được parity check, để việc nhớ một câu trả lời không bị tính là install drift. File được
-đọc lại trước mỗi lần ghi nên hai session song song không đè mất câu trả lời của nhau, và file
-hỏng thì coi như không có learned rule chứ không làm gate fail. Xoá file này để quên toàn bộ.
-
-Pi 0.84.3 không còn tự ghi `/model` hoặc `/thinking` selection vào global settings. Enter chỉ
-đổi session; Ctrl+S mới persist. Vì `settings.json` do repo quản lý, chỉ dùng Ctrl+S khi chủ ý
-đổi default rồi capture thay đổi về repo.
-
-## 5. Subagent và presentation
-
-Public API giữ cố định:
-
-- tools: `subagent`, `send_message`, `list_agents`, `interrupt_agent`;
-- profiles: `explore`, `web`, `work`.
-
-Subagents dùng native Pi RPC. Child process chỉ sống trong một active turn; widget trạng thái
-chỉ hiện các turn đang chạy và tự clear khi child cuối cùng settle. Durable child session vẫn
-nằm dưới `~/.pi/agent/subagents/`, còn xem/resume được qua `/agents` hoặc `list_agents`, và
-không được backup vào repo. Manual/Accept edits coi mỗi new/resumed `work` activation là một
-broad approval scope vì unattended child không forward được từng popup; Plan chặn work
-activation. Parent permission mode không truyền vào
-child. Đây là tool/profile restriction để giảm tai nạn, không phải process isolation; Bash
-network vẫn unrestricted.
-
-`present.ts` không phải public subagent. Exact `/present on` mới cho phép gửi future eligible
-answers sang private ephemeral RPC `openai-codex/gpt-5.6-sol:low`. Original answer luôn là
-nguồn authority. Rewrite chỉ để hiển thị, fail-open, không tạo durable child và usage không
-được cộng vào parent footer totals. Fenced code cùng literal number, URL, path và inline code
-phải giữ exact; mutation làm rewrite bị drop. Event `message_end` đã settle là nguồn text;
-present không gọi thêm `get_last_assistant_text`, vì Pi 0.84.4 đôi khi trả field text không hợp
-lệ ở request thừa đó dù settlement đã thành công. `/reload` reset present về off.
-
-Validator đòi **không được mất gì** và **không được bịa số**, nhưng không so số lần lặp lại —
-gộp hai câu cùng nhắc một ký hiệu là việc rewrite phải làm. Token văn xuôi dạng `a/b`
-(`yes/no`, `Pro/Max`) không bị coi là path. Cả hai đến từ việc chạy pipeline thật trên answer
-trong lịch sử máy này: đếm số lần lặp và slash trong văn xuôi là nguyên nhân của *mọi* lần bị
-loại quan sát được, trên các rewrite không mất gì cả. Lựa chọn hiện tại đến từ benchmark
-quality-only trên 24 answer thật đã lọc secret (mỗi answer tối đa 6 KB), phủ **mọi** reasoning
-label của Pi trên cả hai model: Terra và Sol × `off`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, `max`, mỗi call một lượt đúng production. Mechanical validity đi ngang rồi giảm khi
-effort tăng — Sol 19/18/18/18/17/17 và Terra 17/18/15/15/17/16 từ `off` đến `xhigh` — nghĩa là
-suy nghĩ thêm không mua được reliability. `max` tự loại về mặt vận hành trên cả hai model:
-call 208–213 giây, timeout 240 giây lặp lại, validity thấp nhất mọi arm. Blind review tầng 1
-trong từng model chọn Sol `low` (fidelity, clarity, instruction fit đều 5.00) và Terra `off`.
-Chung kết tầng 2 sau decode: Sol `low` thắng 3 case, Terra `off` thắng 1, hòa 2 — và cả hai
-vết trừ fidelity cục bộ (đổi ngôi sở hữu; bỏ bằng chứng phạm vi review) đều nằm phía Terra.
-Fidelity là trục quyết định đầu tiên, nên production giữ Sol `low`. Static retry vẫn bị loại
-vì chỉ cứu 1/9 failure nhưng tăng latency/cost. Provider, model và effort được derive vào
-`PRESENT_MODEL` chứ không viết lặp;
-lệch giữa tham số spawn và ownership check thì mọi rewrite fail im lặng.
-
-Vì pipeline fail-open, trước đây mọi lối thoát không ra rewrite đều là `return` trần — present
-không ra gì trông y hệt present đang tắt. Chính sự mù đó khiến một validator hỏng nằm im trong
-khi người ta đi chỉnh các núm nhìn thấy được. Giờ mỗi lối thoát đều có tên, được đếm, và đọc
-bằng `/present status`: `source-unsettled`, `source-too-short` (báo riêng ca fence chưa đóng,
-vì ca đó không bao giờ validate được), `source-too-large`, `superseded`, `child-invalid`,
-`child-error`, `result-empty`, `result-too-large`, `fences-changed`, `literals-changed` (nêu
-rõ literal nào bị mất hoặc bị bịa), `failed`, và `ok`. Số đếm chỉ sống trong session, không ghi
-ra đĩa, và phần detail đi qua bộ redact credential dùng chung trước khi lên màn hình.
+Present and its private RPC helpers have been removed. Use `/wait-what` for an on-demand
+explanation instead of automatically sending answers to a second model. Historical Present
+entries remain untouched; their recorded costs still count in the footer, without a separate
+presentation-token segment.
 
 ## 6. Anthropic cache
 
@@ -323,42 +242,26 @@ PI_CACHE_KEEPALIVE_DEBUG=1 pi
 
 Log ở `~/.pi/agent/cache/cache-keepalive.log`; tắt debug sau khi điều tra.
 
-## 7. Safety và giới hạn thật
+## 7. Giới hạn còn lại
 
-- `permission-mode` chỉ thay soft approval policy; known credential deny và canonical path
-  boundary không thể bị Bypass tắt.
-- `permission-gate` là sole pre-execution owner cho model tools; Auto hỏi common authority
-  patterns, Manual/Accept edits hỏi theo matrix, Plan block phòng thủ và Bypass vẫn block
-  protected/outside built-in writes.
-- `context-snapshots` giữ append-only history nhưng chỉ gửi newest runtime/permission snapshot
-  tới provider; runtime snapshot không lặp cwd mà Pi core đã có.
-- `repeat-reminder` gửi runtime-authored custom advisory riêng, không giả system tag trong
-  ordinary tool output.
-- `sandbox-bash` chạy Bash tuần tự qua macOS Seatbelt; Plan không có writable root, reads khác
-  và network vẫn mở, không có unsandboxed retry.
-- `secret-guard` và spill redaction là best effort, không phải data-loss-proof DLP.
-- Global/package extensions chạy với quyền của user.
-- Child reports, web, logs và files đều là untrusted task data.
-- Không dùng setup này để chạy hostile repository hoặc unattended hostile code; cần
-  container/VM/process isolation riêng.
+Không còn permission/sandbox custom. Secret redaction chỉ xử lý một số mẫu trong output,
+không ngăn truy cập host và không bảo đảm che mọi secret.
 
-Tree-rewind checkpoint ordinary worktree changes và tối đa 64 outside files mà `write/edit`
-nêu rõ. Nó không thay backup hoặc git commit. Luôn xem coverage: ignored Bash paths, deep
-nested repos, credential-shaped paths, type changes và outside writes có giới hạn riêng. Old
-sessions bị prune, nhưng một current session rất dài không có hard 2 GiB cap.
+Rewind vẫn checkpoint project và file ngoài project được write/edit nêu rõ. Trước restore/undo,
+nó kiểm tra agent/workflow/job còn chạy và yêu cầu chờ hoặc dừng chúng qua UI package.
+Đây là kiểm tra trong một Pi session, không khóa filesystem toàn máy; checkpoint cha cũng
+không tự bao phủ worktree child hay mọi shell write ngoài project.
 
-Failed Git diff/apply không được coi là successful code/conversation rewind. Sau confirmation,
-Apply/Undo re-snapshot và re-plan dưới write lock, nên same-type edit trong lúc dialog mở trở
-thành exact reverse point. Cả hai revalidate type; Undo type-change cần confirmation riêng và
-incomplete undo giữ retry point. Cancel preview không thay prior undo. Persisted outside path/SHA/mode được validate
-lại; missing nested repo được report unprotected thay vì vô hiệu hóa root checkpoint.
+Goal giữ cơ chế tự tiếp tục và nhường lượt đã có follow-up chờ sẵn. Runtime context giữ
+snapshot mới nhất và loại permission snapshot cũ khỏi context gửi model, không sửa transcript.
+Các cơ chế kiểm tra blob, type change, undo và lock của rewind được giữ. Rewind chỉ restore
+đúng user entry có checkpoint (không lùi về tổ tiên), giữ store khi project tạm biến mất,
+đọc preview có giới hạn và không theo symlink, và ghi index công khai theo dạng base/delta
+có thể replay. Khi Pi tắt, rewind đóng nhận việc mới, hủy lock đang chờ/cold prime, drain
+trọn các job backend đã nhận rồi mới nhả lease; không cài handler signal/exit trong Pi.
 
-Chỉ owner mới release lock; không có automatic stale takeover vì race có thể xóa live
-successor. Signal handlers chỉ tồn tại khi lock đang held; worktree/outside checkpoint/apply và
-projectless outside state cùng dùng store lock. Sau SIGKILL/crash chỉ xóa exact lock path khi đã
-xác nhận không còn Pi session dùng project. Với confirmed type change, replacement được
-materialize trước khi current directory bị move; missing/corrupt blob để nguyên user data.
-Hardlink restore giữ inode, content và mode.
+Compaction dùng cơ chế chuẩn của Pi; `compaction-prune.ts` đã được gỡ vì Pi 0.85.1 tự cắt
+tool result còn 2.000 ký tự khi tóm tắt.
 
 ## 8. Áp dụng và capture thay đổi
 
@@ -377,7 +280,7 @@ Dùng full `./install.sh` nếu đổi runtime/package pin. Chỉ verify:
 ./doctor.sh
 ```
 
-Nếu sửa live config trước, repo phải clean ở sáu managed paths:
+Nếu sửa live config trước, repo phải clean ở tám managed paths:
 
 ```bash
 cd ~/repos/pi-setup
@@ -407,8 +310,7 @@ installer-managed (`PI_MANAGED_INSTALL_ROOT` không được set), nên managed 
 và `pi update --self` không thay thế repo pin, package reconciliation, doctor hoặc rollback.
 
 Trước khi nâng Pi/package, đọc changelog và re-audit private APIs: Bash override,
-compaction-prune, paste-image editor method, RPC settlement/session state, presentation và
-tree events. Sau đó chạy smoke trong disposable trusted project.
+paste-image editor method và tree events. Sau đó chạy smoke trong disposable trusted project.
 
 Verification thủ công:
 
@@ -474,12 +376,6 @@ Không tắt notice để giả vờ sửa cache.
 
 Chạy `./doctor.sh`; nó kiểm global mise env và probe provider thật. Expected mode là
 `technical-safe`. Không dựa vào narrow `~/.Claude Code/agent` alias để che project path bị đổi.
-
-### Presentation không hiện
-
-Chạy exact `/present on`; source phải là successful long prose answer trong interactive TUI.
-New parent turn, tree navigation, toggle-off, model/code mismatch hoặc oversized result đều có
-thể cancel/drop rewrite theo thiết kế.
 
 ## 11. Nguyên tắc cuối
 

@@ -52,14 +52,19 @@ test("grilling and code-review prompts remain bounded and avoid copied rubrics",
   assert.match(rubric, /## Review axes/);
 });
 
-test("Context7 keeps explicit tools and prompt while filtering its recurring package skill", () => {
-  const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
-  const context7 = settings.packages.find((entry) => typeof entry === "object" && entry.source?.includes("context7-pi"));
-  assert.deepEqual(context7, { source: "npm:@upstash/context7-pi@0.1.2", skills: [] });
+test("advisor configuration stays external and host-access prose is absent", () => {
+  const policy = readFileSync(join(root, "AGENTS.md"), "utf8");
+  assert.match(policy, /~\/\.config\/rpiv-advisor\/advisor\.json/);
+  assert.match(policy, /single source of truth for advisor model and effort/);
+  assert.match(policy, /Main-session thinking defaults do not configure advisor effort/);
+  assert.doesNotMatch(policy, /configured `advisor` \(`/);
+  assert.doesNotMatch(policy, /Pi uses ordinary host file and shell tools|per-tool approval gate/);
+  assert.match(policy, /Access only data relevant to the user's task/);
 });
 
-test("subagent mode notice distinguishes fixed profile from inherited parent mode", () => {
-  const source = readFileSync(join(root, "extensions", "permission-mode.ts"), "utf8");
-  assert.match(source, /parent selected this child's tool profile, but parent mode is not inherited/);
-  assert.equal(source.includes("Permission mode is fixed by the parent"), false);
+test("Context7 enables its on-demand skill, tools, and explicit prompt", () => {
+  const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
+  const context7 = settings.packages.filter((entry) =>
+    (typeof entry === "string" ? entry : entry.source)?.includes("context7-pi"));
+  assert.deepEqual(context7, ["npm:@upstash/context7-pi@0.1.2"]);
 });

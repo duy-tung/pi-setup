@@ -11,6 +11,8 @@ AGENT_DIR="$PI_ROOT/agent"
 STATE_DIR="$HOME_REAL/.local/state/pi-setup"
 TMP=""
 ROLLBACK_NEEDED=0
+FINISHING=0
+SIGNAL_DURING_FINISH=0
 
 usage() {
   printf '%s\n' "Usage: ./sync-from-live.sh"
@@ -30,10 +32,59 @@ command -v node >/dev/null 2>&1 || { printf '%s\n' "sync-from-live: node is requ
 # shellcheck source=scripts/operation-lock.sh
 . "$ROOT/scripts/operation-lock.sh"
 acquire_operation_lock "$STATE_DIR" || exit 1
-trap 'release_operation_lock' EXIT
+
+handle_signal() {
+  signal_code="$1"
+  if [ "$FINISHING" -eq 1 ]; then
+    SIGNAL_DURING_FINISH="$signal_code"
+    return 0
+  fi
+  exit "$signal_code"
+}
+
+finish() {
+  code=$?
+  [ "$FINISHING" -eq 0 ] || return 0
+  FINISHING=1
+  preserve_tmp=0
+  set +e
+  if [ "$code" -ne 0 ] && [ "$ROLLBACK_NEEDED" -eq 1 ]; then
+    printf '%s\n' "sync-from-live: restoring repository-managed paths after failure" >&2
+    restore_repo
+    rollback_code=$?
+    if [ "$rollback_code" -ne 0 ]; then
+      preserve_tmp=1
+      printf 'sync-from-live: CRITICAL: rollback was incomplete; before-image preserved at %s/before\n' "$TMP" >&2
+    fi
+  fi
+  if [ "$SIGNAL_DURING_FINISH" -ne 0 ]; then
+    preserve_tmp=1
+    printf 'sync-from-live: CRITICAL: signal %s arrived during cleanup; before-image preserved at %s/before\n' "$SIGNAL_DURING_FINISH" "$TMP" >&2
+  fi
+  if [ -n "$TMP" ] && [ "$preserve_tmp" -eq 0 ] && ! rm -rf -- "$TMP"; then
+    printf 'sync-from-live: CRITICAL: unable to remove transaction %s\n' "$TMP" >&2
+    [ "$code" -ne 0 ] || code=1
+  fi
+  if ! release_operation_lock; then
+    printf '%s\n' 'sync-from-live: CRITICAL: unable to release operation lock' >&2
+    [ "$code" -ne 0 ] || code=1
+  fi
+  if [ "$code" -eq 0 ] && [ "$SIGNAL_DURING_FINISH" -ne 0 ]; then code="$SIGNAL_DURING_FINISH"; fi
+  trap - EXIT INT TERM HUP
+  exit "$code"
+}
+trap finish EXIT
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM HUP
+
 node "$ROOT/scripts/audit-repo.mjs"
 
-if [ -n "$(git -C "$ROOT" status --porcelain -- AGENTS.md settings.json scrub-session-secrets.sh extensions skills prompts)" ]; then
+managed_paths=()
+while IFS= read -r rel || [ -n "$rel" ]; do
+  [ -n "$rel" ] || continue
+  managed_paths+=("$rel")
+done < "$MANIFEST"
+if [ -n "$(git -C "$ROOT" status --porcelain -- "${managed_paths[@]}")" ]; then
   printf '%s\n' "sync-from-live: repository-managed paths are already dirty; review or commit them before capture" >&2
   exit 1
 fi
@@ -41,7 +92,7 @@ fi
 while IFS= read -r rel || [ -n "$rel" ]; do
   [ -n "$rel" ] || continue
   case "$rel" in
-    AGENTS.md|settings.json|scrub-session-secrets.sh|extensions|skills|prompts) ;;
+    AGENTS.md|settings.json|zentui.json|scrub-session-secrets.sh|extensions|skills|prompts|agents) ;;
     *) printf 'sync-from-live: unexpected managed path: %s\n' "$rel" >&2; exit 1 ;;
   esac
   src="$AGENT_DIR/$rel"
@@ -82,29 +133,6 @@ restore_repo() {
   done < "$MANIFEST"
   return "$restore_failed"
 }
-
-finish() {
-  code=$?
-  trap - EXIT INT TERM HUP
-  preserve_tmp=0
-  if [ "$code" -ne 0 ] && [ "$ROLLBACK_NEEDED" -eq 1 ]; then
-    printf '%s\n' "sync-from-live: restoring repository-managed paths after failure" >&2
-    set +e
-    restore_repo
-    rollback_code=$?
-    set -e
-    if [ "$rollback_code" -ne 0 ]; then
-      preserve_tmp=1
-      printf 'sync-from-live: CRITICAL: rollback was incomplete; before-image preserved at %s/before\n' "$TMP" >&2
-    fi
-  fi
-  if [ -n "$TMP" ] && [ "$preserve_tmp" -eq 0 ]; then rm -rf "$TMP"; fi
-  release_operation_lock
-  exit "$code"
-}
-trap finish EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
 
 ROLLBACK_NEEDED=1
 while IFS= read -r rel || [ -n "$rel" ]; do

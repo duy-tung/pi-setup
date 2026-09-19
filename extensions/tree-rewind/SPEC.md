@@ -8,8 +8,8 @@ standing on.**
 
 Each user prompt gets a checkpoint of the whole worktree, taken *before* the
 agent acts, bound to the user message id. The checkpoint is a commit in a
-shadow git repo whose parent is the point we last stood at, so the shadow DAG
-is isomorphic to the session tree:
+shadow git repo whose parent is the point we last stood at. Its before-checkpoint
+ancestry follows the session tree (private safety/operation refs also exist):
 
 ```
 session   P1 ── P2 ── P3            shadow   c1 ── c2 ── c3
@@ -18,17 +18,42 @@ session   P1 ── P2 ── P3            shadow   c1 ── c2 ── c3
 navigateTree(X) → conversation = path(root→X) + worktree = restore(commit(X))
 ```
 
-Consequences that a flat prompt list cannot give:
+Capabilities exposed by the current command and tree hooks:
 
-- rewind to any node, including one on another branch
-- diff any two points (`git diff c3 c7`, ~5 ms)
-- restore a single file from another branch
+- rewind conversation and files to a listed user prompt, including one on another branch
+- preview all affected files before applying, with best-effort `+/−` line counts
+  per restore/delete item (`git diff --no-index --numstat` over current bytes and
+  the target blob; ≤ 1 MiB per side, ≤ 200 files; binary/large/symlink/missing are
+  reported as uncounted, never guessed), then undo an applied rewind
+- code restore options require the exact checkpointed user entry; assistant/tool
+  nodes and uncheckpointed prompts never fall back to an ancestor's before-state
+- line totals in apply notifications remain labelled preview estimates; equal
+  file counts do not prove that the locked re-plan applied identical bytes
+- point-to-point diff and one-file cross-branch restore are backend capabilities only;
+  no command or UI currently exposes them
 - bash is covered for everything `.gitignore` does not hide: `sed -i`, codegen
   and formatters land in the snapshot because the whole worktree does. Inside
   *ignored* directories only paths touched via the `write`/`edit` tools are
   force-tracked — bash writes there carry no tool path, so `npm install` into
   an ignored `node_modules/` is **not** captured. A declared gap, not an
   accident.
+
+## Private operation observations
+
+The user-facing target remains `PromptCheckpoint.snapshot`, the before-prompt
+snapshot. A private optional `after` stores a bounded snapshot/outside/mode/unknown
+observation with an immutable `op-UUID` ref. `agent_settled` completes the current
+operation; a newly persisted queued user prompt first closes the preceding prompt's
+boundary. Intermediate `turn_end` does not close it. After capture does not move
+`state.head`, add commands/options, or append a session JSONL entry.
+
+The next `before_agent_start` awaits an in-flight capture: Pi exposes idle before
+awaiting settled extension handlers. Generation, checkpoint identity, head and
+recovery-revision checks reject stale publication. An explicit file restore
+supersedes a pending observation. Failure retains the original before checkpoint.
+After metadata is private per session; it is not copied into a fork's JSONL.
+These are observations of managed contents, not a freeze of external/background
+writers or proof that every file in the directory was captured.
 
 ## Storage
 
@@ -41,7 +66,8 @@ commits, no staged changes. `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`
 point elsewhere and `GIT_CONFIG_NOSYSTEM` + `GIT_CONFIG_GLOBAL=/dev/null` keep
 the user's config — including any git-lfs filter — out of the capture path.
 
-Measured (M-series Mac, APFS, git 2.53), through the real code path:
+Historical measurements of the original before-only backend (M-series Mac,
+APFS, git 2.53); not remeasured for the 0.4 protection/recovery/after pipeline:
 
 | | linux 94.8k files | vscode 17.9k | terminal 3.7k |
 |--|--|--|--|
@@ -50,7 +76,8 @@ Measured (M-series Mac, APFS, git 2.53), through the real code path:
 | build restore plan | 6 ms | 5 ms | 5 ms |
 | apply | 239 ms | 143 ms | ~30 ms |
 
-Checkpoints are taken while the model is thinking, so the cost is hidden.
+The pre-prompt checkpoint is awaited at `turn_start` after the user entry is
+persisted, before the model/tools act. Cold priming starts in the background.
 
 Priming is bounded, not blocking: a prompt waits at most 2 s for the cold
 snapshot, then proceeds and says the prompt is unprotected. Stalling the agent
@@ -65,9 +92,16 @@ and a losing writer simply fails. Measured without a lock: two processes taking
 recorded as valid checkpoints that restored nothing.
 
 So: an owner-token advisory lock (`snapshot.lock`) wraps prime, snapshot,
-restore-apply and maintenance. Only the current owner may release it; process-wide
-signal handlers exist only while at least one lock is held, and normal exit or
-catchable signals clean it up before termination. There is
+restore-apply and maintenance. Only the current owner may release it. Hosted
+lifetimes install no process signal/exit cleanup: Pi owns termination. Shutdown
+closes admission, cancels queued locks and cold-prime Git, then drains complete
+accepted backend jobs before final index publication. UI dialogs are not drain
+jobs, and generation/lifetime guards suppress their late replies and UI updates.
+Before-checkpoint Git and private metadata publish under one transaction lock.
+A workspace and its per-instance session lease publish together only after prime
+and a generation check; marking/releasing leases also holds the store lock.
+Standalone helpers install handlers only while holding locks and drain writers on
+catchable signals. Forced exit/crash retains uncertain locks. There is
 no automatic stale takeover: POSIX cannot compare-and-unlink, so a contender can
 judge dead lock A stale and accidentally remove newly acquired live lock B.
 After SIGKILL/crash, operations fail closed with the exact path for manual removal
@@ -75,11 +109,17 @@ after confirming no session owns it. Root initialization, worktree/outside check
 state, and maintenance all use that store lock. Restores go through a private
 throwaway index, so a concurrent snapshot can never rewrite the index between `read-tree` and
 `checkout-index`. Git failures throw instead of degrading into an empty
-result: any `add` failure beyond unreadable individual files aborts the
-checkpoint, because a stale index commits the *previous* worktree while
-looking valid. On the hot path a snapshot waits at most 5 s for the lock,
+result: any `add` failure beyond unreadable individual files aborts even a raw
+backend snapshot. Guarded frontend captures also reject partial indexing (including
+warnings), because omitted files imply unknown absence and retained index blobs may
+contain *previous* contents. They must not become a valid checkpoint or Undo. On the hot path a snapshot waits at most 5 s for the lock,
 then declares the prompt unprotected. 3 processes × 8 checkpoints on vscode:
-24/24 succeed in 2.4 s.
+24/24 succeed in 2.4 s (historical measurement).
+
+The lock coordinates cooperating store operations, not arbitrary filesystem
+writers. Package-reported background activity blocks restores. In-place hardlink
+restores also affect sibling links outside the project; path checks and outside
+confirmation do not provide an OS sandbox.
 
 ## Maintenance
 
@@ -89,10 +129,62 @@ if anything was pruned, loose objects exceed 5,000, or the store exceeds 2 GB.
 The 2 GB threshold triggers GC, not a hard cap: current-session refs remain and a
 single very long session can exceed it until that session ages out. Everything worth keeping carries a ref — including the undo point exposed through `/rewind` — and the
 ref is written inside the snapshot lock, so no commit is ever visible
-unreferenced. Maintenance itself runs under the store lock and prunes with a
-30-minute grace (`--prune=30.minutes.ago`): a parallel session's in-flight
+unreferenced. Shutdown maintenance has zero-wait acquisition (busy means skip),
+using a separate hosted lifetime after ordinary admission closes. Once acquired,
+it drains to completion; a timeout is never treated as proof of writer termination.
+Contended lease release conservatively retains the lease. Maintenance itself runs
+under the store lock and prunes with a 30-minute grace (`--prune=30.minutes.ago`): a parallel session's in-flight
 objects are never collected. (`--prune=now` deleted a seconds-old commit the
 instant it was unreferenced; measured.)
+
+Unfinished recovery sessions are exempt from retention, including outside-only
+journals and missing projects. Malformed/unreadable recovery metadata prevents
+pruning. Completed Undo follows ordinary workspace session retention; its timestamp
+counts toward recency. Projectless completed Undo follows outside blob age, excluding
+the current session and newer checkpoint/record activity. Normal outside checkpoint
+and operation-observation blobs may age out; Undo/journal blobs remain pinned.
+
+Whole-store sweeping is stricter: missing origins never authorize deletion. It
+retains refs, blobs, private metadata, leases, any lock, and unreadable/symlinked
+or otherwise uncertain state. Eligible ref-less stores are checked under a
+nonwaiting exclusive lock and atomically renamed before recursive removal, so a
+new writer cannot enter a half-deleted namespace. Per-session maintenance owns
+metadata retention; failed removals leave a `.reaping-*` quarantine.
+
+## Project first-touch coverage
+
+New checkpoints inventory ignored names (bounded to 4,096 entries, otherwise
+root-unknown) without copying all ignored contents. A named `write`/`edit` patches
+only the current checkpoint's owned shadow with the immediate pre-write file or
+symlink, mode, and explicit absence. It never retroactively asserts newly observed
+project contents at every older checkpoint. Older/missing coverage is unknown, not
+proof of absence: ambiguous delete/type-to-absence actions become unprotected.
+Backfill only supplements unknown coverage: known pre-prompt absence remains absent
+if bash creates a file before a later named edit. Every guarded capture records
+explicit absence for previously named paths under the same snapshot lock, including
+Undo preimages. Force-tracked paths persist across reload and are re-staged after
+recreation. Bash/manual edits of unknown files before first named touch remain
+outside this guarantee.
+
+Private checkpoint JSON is authoritative when its revision is newer than the
+JSONL index; at equal revision the later JSONL flush wins for before data, while
+private-only after metadata is merged separately. Atomic pre-tool publication is
+required, otherwise the tool is blocked. After rename, a sync/close error is marked
+published: callers must preserve the new ref, not roll it back under a live pointer.
+The file remains untouched and reload resolves the published revision.
+
+The public JSONL index (custom `pi-rewind-cp`, version 5) is dirty-gated and
+incremental: a `base` carries every before checkpoint; a `delta` carries only the
+complete objects that changed plus removed IDs, chained by `parent` token. A base
+is republished when the previous batch is not on the active branch (tree
+navigation), when the session owner changes (fork child), or when no branch is
+available; a fork whose branch skipped an older batch would otherwise lose that
+checkpoint. Replay is file-ordered; legacy version 3/4 full arrays still load. A
+delta whose parent is not the preceding batch applies its complete objects, skips
+removals, and reports an incomplete chain. After-only changes never append.
+Published objects are detached copies. Growth per new checkpoint is bounded by
+that checkpoint's size except at the base exceptions above; private per-session
+full-state writes remain O(N) and synchronous before tools.
 
 ## Coverage rules
 
@@ -112,19 +204,21 @@ coverage**. Everything below was decided from measurement, not assumption; see
 | case collisions | detect, declare, refuse | on APFS/Windows the pair is one file; restoring either overwrites the other, with no error from git |
 | type changes | separate confirmation; materialize promised replacement before atomically moving the current path, rollback on install failure | `checkout-index -f` will `rm -rf` a directory before proving the replacement can be installed |
 
-`/rewind → coverage report` lists everything currently unprotected.
+`/rewind → coverage report` describes workspace gaps; the target-specific preview
+also reports unknown/unprotected paths.
 
 ## Files outside the project
 
 A second mechanism, deliberately not a bigger repo. Blobs under
-`~/.pi/agent/rewind/<hash(project)>/outside/<sha>`, mode 0600, pruned by age.
+`~/.pi/agent/rewind/<hash(project)>/outside/<prefix>/<sha>`, mode 0600, pruned by age
+except when pinned for Undo/recovery.
 
 Capture is in `tool_call`, which pi awaits before running the tool
 (`agent.beforeToolCall`), so the blob is the pre-write content. That baseline
 is then back-filled into every existing checkpoint that has not already
-recorded the path — before this write, that is what the file looked like at
-each of those points — which is what makes a rewind to *any* earlier node
-restore it, not just the most recent one. `absent` is a recorded state, so a
+recorded the path. This retained outside-file convention uses first-touch state
+for older prompts too; it is not evidence of historical contents before earlier
+untracked manual/bash changes. `absent` is a recorded state, so a
 file the agent created is removed on rewind rather than silently left behind.
 
 Where `eligibility.ts` refuses the directory outright (`~`, `Downloads`, a
@@ -145,7 +239,7 @@ link.
 ## Restore
 
 ```
-1. snapshot the worktree now              → this is the undo point in /rewind
+1. snapshot the worktree now              → preview only; prior Undo stays intact
 2. diff now..target                       → O(changed files), not O(repo)
 3. classify: restore | delete | type-change | unprotected
 4. preview, then apply
@@ -157,7 +251,7 @@ link.
 ```
 
 After confirmation, Apply and Undo re-snapshot/re-plan under the same lock as
-the writes, making intervening same-type edits the exact reverse point. They also
+the writes, making captured intervening same-type edits the reverse point. They also
 re-check on-disk shape before every bulk checkout, delete, or in-place write; any
 newly detected type change is skipped until separately confirmed. Cancelling a preview preserves the prior undo. Persisted outside
 entries are canonicalized through the current deny list and strict SHA/mode
@@ -167,16 +261,54 @@ open, and Node's
 worktree (git's own writers are immune; reproduced with the Node ones). A
 mismatch is refused and reported, never guessed at.
 
+### Durable restore transaction
+
+Private `recovery/<sha256(sessionId)>.json` records identity, monotonic revision,
+Undo, and an optional pending/failed journal. Schema/path/registry checks and
+bounded private JSON reads fail closed. Writes use a private temp file, file fsync,
+and same-directory rename; checkpoint JSON is limited to 64 MiB and recovery JSON
+to 4 MiB. These are process-interruption guarantees, not power-loss guarantees.
+
+Inside `snapshot.lock`: validate current recovery revision; capture current managed
+state; pin immutable transaction before/target/previous-Undo refs; publish the
+journal; write content/outside/modes; then publish the final Undo and clear the
+journal. Failure keeps the retry target. Mutable legacy `undo` refs are compatibility
+aliases, never authoritative over the private record. Unpublished temporary refs
+are cleaned only when metadata proves they are not owned; uncertainty retains them.
+
+Startup never replays files. Pending recovery blocks a new file rewind; the
+existing Undo menu previews and explicitly confirms recovery. Changes to managed
+state after that recovery preview require a new preview. Verified no-op recovery
+can clear a journal. All outside Undo targets must remain intact, even when a
+missing blob was classified unprotected by planning; refusal occurs before writers.
+Skipped managed Undo targets remain retryable instead of retiring an incomplete
+destination. Coverage-only diagnostics for nested repositories absent from the
+target tuple are not managed targets: they remain visible but do not block Undo
+completion, verified no-op recovery, or head advancement. A missing formerly managed
+nested target is still required, not coverage-only.
+Current outside
+paths that cannot provide an authorized, intact preimage are refused before any
+write, even if type replacement was confirmed. Preserve/resolve those paths first.
+
+Undo remains per-session and reversible after successful use; cancellation preserves
+its previous destination. A combined fork's file restore belongs to the parent;
+the child's copied before-checkpoint history does not transfer the parent's Undo. A crash can leave the deliberately non-stealable store
+lock; operator resolution is still required. No new slash command, tree option,
+double-Escape action, or after-state navigation target is introduced.
+
 ## Not covered
 
 - `/share` does not upload the shadow store; it is a sidecar, not part of the
   session JSONL.
 - A prompt issued during the cold prime of a very large repo is not
   checkpointed. It is reported, not hidden.
-- Pi's `compact()` cannot pin an exact cut entry from a command context, so
-  "summarize from/up to here" passes custom instructions only. The
-  `session_before_compact` hook can return `firstKeptEntryId`, so exact parity
-  is reachable if it ever proves worth it.
+- Pi's `compact()` cannot pin an exact cut entry from a command context, and
+  `session_before_compact` can only cancel or supply a finished `CompactionResult`
+  (which means reproducing `prepareCompaction` in the extension). So the menu
+  offers `Compact, focusing on this prompt` — ordinary compaction with the prompt
+  as the summary's focus — rather than promising Claude Code's "summarize up to /
+  from here". "From here" (keep earlier, summarize the tail) has no representation
+  in Pi's compaction model at all.
 - `Esc Esc` opens `/tree`, and the `session_before_tree` hook offers the
   restore menu there, so it already works. A dedicated `doubleEscapeAction:
   "rewind"` would only swap the tree for a flat prompt list — which is Claude

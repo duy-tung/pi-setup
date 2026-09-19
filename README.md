@@ -1,7 +1,7 @@
 # Portable Pi setup for macOS
 
 Personal configuration and bootstrap for the [Pi coding agent](https://github.com/badlogic/pi-mono).
-This public repository is the source of truth for six managed resources under
+This public repository is the source of truth for eight managed resources under
 `~/.pi/agent/`; credentials, runtime state, caches, and session logs stay local.
 No root license is granted: public visibility alone does not authorize reuse, and bundled
 components retain their own license notices.
@@ -10,14 +10,14 @@ components retain their own license notices.
 
 | Item | Value |
 |---|---|
-| Pi | `@earendil-works/pi-coding-agent` 0.84.4 |
+| Pi | `@earendil-works/pi-coding-agent` 0.85.1 |
 | Node | 24.15.0, managed by mise |
-| Subagent transport | Native Pi RPC (`--mode rpc`) |
+| Subagent orchestration | `@tintinweb/pi-subagents@0.19.0` |
 | Live config | `~/.pi/agent/` |
 | Setup source | [duy-tung/pi-setup](https://github.com/duy-tung/pi-setup) |
 | Rewind source | Bundled package under `extensions/tree-rewind/` (imported from `65fa4fa`) |
 
-Current inventory: **18 extensions**, **6 skills**, and **5 prompt templates**.
+Current inventory: **8 local extensions**, **10 pinned external packages**, **6 skills**, **5 prompt templates**, and **4 agent definitions**.
 
 ## Install on another Mac
 
@@ -36,21 +36,26 @@ cd ~/repos/pi-setup
 
 Run `gh auth login` before authenticated GitHub operations such as creating repositories or pushing.
 
-`install.sh` pins Node/Pi, three top-level package versions, long cache retention,
+`install.sh` pins Node/Pi, nine top-level package versions, long cache retention,
 and technical-safe OAuth prompt rewriting; it then applies only the managed config and
-runs no-cost verification. Replaced config is backed up under
-`~/.local/state/pi-setup/backups/`. Normal errors and catchable signals restore
-managed config, selected mise config/Pi version, and configured package stores;
-a prior different Pi version is reconstructed from npm rather than byte-restored.
-SIGKILL/power loss can leave the fail-closed operation lock and preserved transaction
-for manual recovery. At most an inert, unselected mise Node download may remain.
+runs no-cost verification. It honors `MISE_GLOBAL_CONFIG_FILE`, then `MISE_CONFIG_DIR`,
+then the XDG/default mise path when selecting the global config to preserve. Replaced
+config is backed up under `~/.local/state/pi-setup/backups/`. New backups carry an
+ownership marker and expire after 30 days; existing unmarked backups are never adopted or
+pruned. Cleanup traps are active before staging or transaction creation. Normal errors and
+catchable signals restore managed config, selected mise config/Pi version, and configured
+package stores. Package reconciliation updates the managed pins in a transactional copy, so
+unrelated package-store entries survive, and patch checksum readiness is part of the transaction decision. A prior different Pi version
+is reconstructed from npm rather than byte-restored. SIGKILL/power loss can leave the
+fail-closed operation lock and preserved transaction for manual recovery. At most an inert,
+unselected mise Node download may remain.
 Authentication, sessions, trust decisions, spills, and rewind state are never copied
 or replaced.
 
 Provider identity is deliberately not portable. Start Pi and use `/login` for
 Anthropic and Codex on the new machine; make project trust decisions again.
-The installer supports macOS only because the current Bash confinement depends
-on Seatbelt.
+The installer remains verified on macOS. Pi uses ordinary host Bash/file access; no
+custom sandbox or per-tool permission gate is installed.
 
 ## Runtime layout
 
@@ -58,12 +63,14 @@ on Seatbelt.
 ~/.pi/agent/
 ├── AGENTS.md                 global behavior rules
 ├── settings.json             models, packages, compaction, retry, TUI
+├── zentui.json               editor/message appearance; preserves the custom footer
 ├── extensions/               always-loaded TypeScript extensions
 │   └── tree-rewind/          bundled extension package
 ├── skills/                   capabilities loaded on demand
 ├── prompts/                  explicit slash-command templates
+├── agents/                   subagent definitions (Explore, Plan, general-purpose, final-reviewer)
 ├── sessions/                 local session logs (not tracked)
-├── subagents/                private RPC child sessions (not tracked)
+├── subagents/                historical custom child sessions (not imported)
 ├── auth.json                 provider credentials (not tracked)
 └── cache/, npm/, git/, trust.json  runtime data (not tracked)
 ```
@@ -81,7 +88,8 @@ Pi discovers files under `extensions/`, `skills/`, and `prompts/` automatically.
 - use direct paths before adding machinery, and incremental work for larger changes;
 - ground claims in primary evidence, reproduce bugs, and verify proportionately;
 - treat task data as data, preserve user work, and require authority for external effects;
-- respect permission denials and protect credential paths.
+- execute already-authorized work without redundant confirmation, including outside cwd;
+- keep secret values out of model output and logs.
 
 The repository-root `AGENTS.override.md` is intentionally not installed. Inside this source
 repo it replaces the identical project copy, so Pi loads the full managed global policy only
@@ -98,13 +106,14 @@ after its authority and trust-boundary findings were fixed.
 - portable npm wrapper: `mise --no-config exec node@24.15.0 -- npm` (ignores project config without changing package cwd);
 - exact external package pins, including npm versions;
 - exact initial built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` (no PowerShell);
-- default provider/model: Anthropic, `claude-fable-5`;
+- default provider/model: OpenAI Codex, `gpt-6-astra` at thinking `high` (matches the live
+  profile; the advisor and final reviewer are configured separately, see AGENTS.md);
 - Anthropic OAuth provider pinned to Git release `pi-anthropic-oauth-plus@v0.3.2`;
 - global OAuth identity rewriting pinned to `technical-safe`: standalone `Pi` identity text may become `Claude Code`, while `.pi`, `pi-setup`, and ordinary paths remain literal;
-- default thinking: `xhigh`; `/model` and `/thinking` changes stay session-local unless Ctrl+S explicitly saves a global default;
-- enabled model families: Claude Fable/Opus/Sonnet/Haiku and
-  `openai-codex/gpt-5.6-*`;
-- fullscreen dark TUI with nvim as the external editor;
+- per-model thinking defaults: Fable 5.1 `medium`, GPT-6 Astra `high`; the default
+  level is `high`. Explicit session choices still take precedence; `/fast` stays manual;
+- scoped models: `anthropic/claude-fable-5-1` and `openai-codex/gpt-6-astra`;
+- fullscreen TUI, `catppuccin-mocha` theme from the themes bundle, nvim as the external editor;
 - project-local trust policy: ask;
 - compaction enabled (`reserveTokens: 16384`, `keepRecentTokens: 32000`);
 - cache-miss notices enabled, including Pi 0.84.3+ compaction and branch-summary usage notices;
@@ -116,8 +125,15 @@ after its authority and trust-boundary findings were fixed.
 | Package | Purpose |
 |---|---|
 | `pi-anthropic-oauth-plus@v0.3.2` (pinned Git) | Anthropic OAuth, 1-hour cache/keepalive, Pi 0.84.3+ request hooks, and server-side fallback pricing |
-| `pi-web-search@1.3.1` (patched) | Web search tools; carries `patches/pi-web-search-oauth-system.patch` |
-| `@upstash/context7-pi@0.1.2` | Context7 tools and explicit `/c7-docs`; its redundant package skill is filtered out |
+| `pi-web-search@1.4.0` (patched) | Web search tools; carries `patches/pi-web-search-oauth-system.patch` |
+| `@upstash/context7-pi@0.1.2` | Context7 tools, explicit `/c7-docs`, and the on-demand `context7-docs` skill |
+| `@juicesharp/rpiv-ask-user-question@2.9.0` | Structured questions, previews, free text and review UI |
+| `@juicesharp/rpiv-todo@2.9.0` | Task IDs, dependencies and persistent todo panel |
+| `@tintinweb/pi-subagents@0.19.0` | Agent, steering/resume, FleetView, workflows, scheduling and worktrees |
+| `pi-zentui@0.22.3` | Compact Accent Rail editor, framed user messages and themed selectors; footer stays native |
+| `@juicesharp/rpiv-advisor@2.9.0` | Preserved user-installed advisor package |
+| `pi-background-tasks@2.5.0` | Shell jobs, logs and completion; delegate/Fusion tools also available |
+| `@firstpick/pi-themes-bundle@0.1.6` | Theme bundle providing `catppuccin-mocha` |
 
 These are exact top-level pins, not a hermetic supply-chain lock: Pi's published npm
 package can resolve newer transitive versions allowed by its own ranges. `doctor.sh`
@@ -126,6 +142,13 @@ isolated load health; it does not hash every installed npm implementation byte. 
 v0.3.2 honors Pi's request-body/tool-choice hooks, preserves required betas while rejecting
 fine-grained tool streaming, and records the returned fallback model with its own pricing.
 
+### Advisor configuration
+
+`~/.config/rpiv-advisor/advisor.json` is the single source of truth for advisor model
+and effort. `AGENTS.md` references that file rather than duplicating its values.
+The main-session thinking settings in `settings.json` are independent. Advisor config
+remains machine-local and is not copied by this repository's installer.
+
 ### Patched packages
 
 A published package that needs a local source fix carries a unified diff under
@@ -133,14 +156,42 @@ A published package that needs a local source fix carries a unified diff under
 verifies the pinned post-image checksum of the patched file, so a reinstall, a version
 bump, or a hand edit that drops the fix fails loudly instead of silently regressing.
 
-`patches/pi-web-search-oauth-system.patch` is the only current entry.
+`patches/pi-web-search-oauth-system.patch` fixes the web-search path below.
+`patches/pi-subagents-activity.patch` adds a read-only activity query for rewind, including
+queued/nested agents and workflows between child activations. Both post-images are verified.
+`patches/pi-background-tasks-theme.patch` replaces the background dock's fixed light-blue
+palette with Pi theme colors, and removes nested status colors from selected rows so text
+stays legible. Both patched files have pinned checksums.
+
+Checksums prove a patch is applied, not that it is coherent: an earlier revision of
+the theme patch deleted a colour helper and left one call behind, which only showed
+up as a crash when the background-task log view was opened.
+`tests/patched-packages-typecheck.test.mjs` therefore compiles each patched package
+against the installed Pi types and against the same tree with the patch reversed,
+failing only on errors the patch itself introduces. It needs a TypeScript compiler
+(any one already resolvable from this repository, the agent directory, or
+`PI_SETUP_TSC`); without one the gate skips and `doctor.sh` prints a warning.
 `pi-web-search` bypasses the provider and calls `/v1/messages` directly for the
 Anthropic-native `web_search` tool, but sends no `system` field. A Claude Pro/Max OAuth
 token is only accepted when the first system block is the Claude Code identity, so
 without it Anthropic answers `429 rate_limit_error` with a generic `"Error"` message and
 no `anthropic-ratelimit-*` headers - a policy rejection that reads like an exhausted
-quota. The patch adds that block for OAuth credentials only; API-key requests are
-unchanged. Upstream has not been notified yet.
+quota. The patch adds that block only for OAuth credentials and updates the OAuth
+search User-Agent to Claude Code 2.1.261 (Fable 5.1 rejects versions below 2.1.251).
+It also selects `web_search_20260318` with full response inclusion and dynamic filtering
+by default. If code execution returns a capacity/availability error without running search,
+one fresh direct search is allowed using the same tool version; its result explicitly
+reports the fallback. It never retries search quota errors by switching modes.
+Paused server turns replay the original content (including encrypted data, caller metadata,
+signatures and container identity), with at most four requests per tool invocation.
+Incomplete streams and exhausted continuation budgets are explicit failures.
+API-key authentication stays unchanged; the new server-tool version applies to both auth modes.
+OpenAI/Codex still uses `web_search`, inheriting the live session's thinking level on
+each call and applying Pi's model capability clamp and provider effort mapping. This
+replaces upstream's hard-coded `none`, which GPT-6 Astra rejects; Astra at `high`
+therefore searches at `high`. Non-reasoning models omit the reasoning field, as do
+older contexts without a thinking level (leaving the server default intact).
+Upstream has not been notified of the local patch.
 
 ### Anthropic prompt-cache policy
 
@@ -172,179 +223,112 @@ Extensions are always discovered. A command or UI-only extension has negligible 
 cost; extensions that register tools add their schemas to the model context on every
 turn.
 
-### Safety and context control
+### Context and host access
 
-| Extension | Behavior |
-|---|---|
-| `permission-mode.ts` | User-owned Auto, Manual, Accept edits, Plan, and transient Bypass modes; branch-local state and footer status through `/mode` or `Ctrl+Alt+M` |
-| `permission-gate.ts` | Single pre-execution owner: invariant credential/path denies, mode-aware one-call approvals, common commit/push/delete/deploy patterns, and defensive Plan/Bypass boundaries |
-| `context-snapshots.ts` | Projects only the newest runtime and permission snapshot to each model call while preserving append-only session history |
-| `secret-guard.ts` | Best-effort known-pattern redaction of final text tool results before the normal transcript/provider path |
-| `sandbox-bash.ts` | Sequential per-call macOS Seatbelt confinement for Bash file writes and known credential reads, plus environment scrubbing; Plan has no writable roots, network remains unrestricted, and there is no agent escalation |
-| `spill.ts` | Stores output larger than 16 KiB as a private redacted artifact; unsafe raw core output is withheld, never exposed as a locator |
-| `compaction-prune.ts` | Trims oversized blocks before the compaction summarizer sees them |
-| `repeat-reminder.ts` | Detects identical repeated tool calls and queues a separately marked runtime advisory instead of imitating a system tag inside tool output |
-| `runtime-context.ts` | Adds branch, dirty state, and date snapshots without duplicating Pi core's cwd system instruction |
+Pi's built-in Bash, read, edit and write tools use normal host permissions. There is no
+custom Auto/Manual/Plan/Bypass mode and no Seatbelt wrapper. Project trust still controls
+loading project resources. AGENTS asks only for missing material choices or actions beyond
+the task; authorization already given covers its necessary implementation steps.
 
-`/mode` opens a five-row selector; `Ctrl+Alt+M` opens the same UI. Auto is the default
-and follows the permission model described under [Permission rules](#permission-rules):
-recognized commit, deletion, publishing, deployment, and destructive command patterns ask,
-and most of those prompts offer to stop asking. Pattern matching is deliberately not an
-exhaustive shell policy, so the model must still obey `AGENTS.md` authority rules. Manual
-asks once for every edit/write, every Bash call, and every mutation-capable work-child
-activation. Accept edits allows ordinary
-workspace edit/write calls but still asks for Bash, protected/outside writes, unknown
-side-effect tools, and work-child activation. Plan removes `bash`, `edit`, and `write`,
-blocks work children and unknown side-effect tools, and restores only the tools it disabled
-when leaving. Auto, Manual, Accept edits, and Plan follow the active session branch.
-
-Bypass requires an attended confirmation and active macOS Seatbelt. It skips gate prompts
-for the current runtime only; it is not authorization to commit, push, deploy, publish, or
-delete user work. Bash stays workspace-confined, built-in protected/outside writes and
-credential access stay blocked, and RPC children retain their fixed independent policy.
-Reload, resume, fork, or a new session returns Bypass to Auto. Mode changes and
-conversation-tree navigation are refused while a work child is starting/running.
-
-### Permission rules
-
-`extensions/lib/permission-rules.ts` implements Claude Code's permission model. Rules are
-`Tool(specifier)` strings — `Bash(git push *)`, `Edit(/path/**)` — in three tiers whose
-precedence is **deny > ask > allow**. `Bash(prefix *)` matches a command and its arguments;
-a path specifier ending in `/**` matches a subtree.
-
-A command is matched after heredoc bodies and quoted literals are stripped, and each
-`&&`/`;`/`|` segment is judged separately with the most severe decision winning. Writing a
-test file whose body mentions `git commit` therefore no longer trips the commit prompt.
-
-| Tier | Behavior |
-|---|---|
-| `deny` | Hard block. Credential reads (`gh auth token`, `op read`, keychain dumps) and device-destroying writes (`mkfs`, `shred`, `diskutil erase`). Never overridable. |
-| `ask` | Prompts. Most entries offer **Always allow `<rule>`**, which files a learned rule that cancels the default. The `NEVER_REMEMBER` subset — `sudo`, `git push`, publish, deploy, `shutdown` — always re-asks, because it reaches outside this machine or cannot be undone from here. |
-| `allow` | Silent. Read-only `git status`/`diff`/`log`/`show` and `gh pr view`/`diff`. |
-| unmatched | Runs in Auto. Asks in Manual and Accept edits. |
-
-Two places deliberately depart from Claude Code, both because this setup has layers Claude
-Code does not:
-
-- **Unmatched Bash runs in Auto.** Claude Code must ask about every unfamiliar command
-  because nothing else confines it. Here `sandbox-bash.ts` gives each command a Seatbelt
-  profile that limits writes to the workspace and temp and makes credentials unreadable,
-  and `tree-rewind` checkpoints the workspace. Asking anyway would have cost 725 first-time
-  prompts across this machine's session history.
-- **`rm -rf` asks rather than being denied.** The same two layers make a confined,
-  checkpointed delete recoverable.
-
-Every prompt shows a clamped copy of the operation — bounded by terminal rows and columns,
-keeping both ends of each line — because Pi renders an extension dialog as an unscrolled Text,
-so a heredoc commit message would otherwise push the transcript off screen. Rule matching,
-path resolution, and the model-facing message still use the complete command.
-
-Auto treats the session's working directory as the workspace and does not re-ask inside it,
-as Claude Code does. Protected writes (`~/.zshrc`, `~/.gitconfig`, `~/.pi/agent`, project
-`.git/config` and hooks) and sensitive paths keep their own prompt and hard block
-regardless, which is what keeps that safe when a session starts in `$HOME`.
-
-Learned rules live in `~/.local/state/pi-setup/permission-rules.json`, deliberately outside
-the parity-checked managed config so that remembering an answer never registers as install
-drift. The file is re-read before each write so concurrent sessions do not discard one
-another's answers, and a corrupt file degrades to no learned rules rather than failing the
-gate. Delete it to forget every remembered answer.
+`runtime-context.ts` owns both snapshot creation and outgoing context projection. Its
+instance-local state survives compaction and is recovered from the active branch on session
+start or tree navigation. The pure `lib/context-snapshots.ts` helper keeps only the current
+runtime facts and removes retired permission snapshots without editing session history.
+It is not a separate extension: Pi loads separate entrypoints with separate module state.
+Compaction uses
+Pi's own preparation: 0.85.1 already caps serialized tool results at 2,000 characters, so
+no custom pruning extension is installed. `secret-guard.ts` and `spill.ts` redact known credential patterns
+in output; neither restricts host access or guarantees complete redaction. Spill keeps a 32 KiB
+inline budget, but handles raw Bash output files even below that budget when core truncates by
+line count. A bounded full output is copied to a private redacted file before best-effort removal
+of the original. If copying fails or exceeds 8 MiB, the raw locator is withheld from both the
+preview and result metadata; short previews remain intact. Nonzero exits/timeouts can drop
+that metadata: recognized locators in error text are suppressed without reading or deleting
+the named file. Such raw temporary files may remain on disk; text alone is not file authority.
 
 ### Interaction and orchestration
 
-| Extension | Behavior | User surface |
-|---|---|---|
-| `ask-user.ts` | Structured multiple-choice/input questions with a bounded, PageUp/PageDown-scrollable long-question viewport | model tool `ask_user` |
-| `todos.ts` | Model-managed task checklist with a TUI widget | tool `todowrite`, `/todos` |
-| `goal.ts` | Event-sourced long-running goals with autonomous continuation rounds | tools `create_goal`, `get_goal`, `update_goal`; `/goal` |
-| `subagent.ts` | Resumable Pi RPC children with parent-scoped state and explore, web, and work profiles | tools `subagent`, `send_message`, `list_agents`, `interrupt_agent`; `/agents` |
-| `paste-image-attach.ts` | Converts pasted or dragged image paths into actual image attachments, avoiding an extra `read` turn | automatic |
+Use `ask_user_question` for decisions, `todo` for tasks, `Agent` for model delegation, and
+`bg_run` for shell jobs. `/todos`, `/agents`, `/jobs`, and `/logs` belong to the packages.
+Package defaults govern UI and concurrency. Worktree isolation is available on request;
+it may auto-commit child changes to its branch. Review before integrating. Scheduling is
+available but no recurring jobs are created by this setup.
 
-`subagent.ts` uses Pi's native RPC protocol. A child process exists only for one active
-turn; its durable session remains under
-`~/.pi/agent/subagents/<parent-session-id>/<child-id>/` for `send_message` follow-ups.
-Background completion is delivered automatically. The TUI status widget shows only active
-turns and clears when the last child settles, while `/agents` and `list_agents` retain durable
-children for transcript inspection and follow-ups. Child IDs are authorized to their exact
-parent session; per-child control is serialized across settlement/cold-resume boundaries, and there is no
-cwd override, orphan adoption, nesting, or polling tool.
+`goal.ts` retains explicit goals and autonomous continuation. It defers to already-queued
+package/user follow-ups instead of scheduling a duplicate next turn. `paste-image-attach.ts`
+continues to handle pasted/dragged images.
 
-Every child uses `--no-approve`, so project-controlled extensions and context cannot shadow
-an allowed built-in tool name. The `web` profile additionally uses `--no-context-files` and
-has no filesystem tools. The `explore` profile has Bash, but `PI_SUBAGENT_READONLY=1` gives it
-a Seatbelt profile with `(deny network*)` whose only writable root is the child's own
-`scratch/` directory, so `git log`/`git diff` and other inspection work while the workspace and
-egress are denied by the OS; where that sandbox is unavailable, Bash is dropped from the
-profile instead of running unconfined. Scratch is how a child returns more than its 16KB
-report: the parent reads those files by path, which is the one child output that reaches
-parent context without redaction and marking. It is deleted when the parent session ends, and
-anything a crashed session left is swept after seven days. The `work`
-profile still requires the parent to be in a trusted,
-non-broad workspace, but the standalone child prompt must carry the relevant project rules.
-Its Bash is offline unless the `subagent` call passes `network: true`, which asks for
-confirmation in every mode except Bypass; the grant is recorded in the child's identity, so a
-resume cannot add it. Manual and Accept edits treat each new/resumed work
-activation as one broad approval scope because an unattended child cannot forward per-edit
-prompts. Plan blocks those activations, and no parent mode is passed into the child. These are
-model-tool restrictions and accident resistance, not process isolation. Because a profile names
-its tools as strings, an uninstalled package would silently shrink a child: a partial gap is
-reported once per session and a profile with nothing installed refuses to start. RPC dialogs fail closed, reports are
-redacted/marked/capped before entering parent context, and active children stop on every
-parent session shutdown.
+The background package's attribution entrypoint is filtered out of the main session:
+`pi-anthropic-oauth-plus@v0.3.2` remains its Anthropic provider, including long cache and
+keepalive. Isolated package-owned delegate/Fusion/attested children use the provider
+entrypoint they explicitly load. Shell jobs have durable logs but stop on reload/shutdown.
+
+Existing custom todo snapshots and child IDs remain readable history; the new packages
+do not import or resume them. Start new delegated work with the new API.
 
 ### Model and UI helpers
 
+Zentui owns the input/message treatments, while `statusline.ts` remains the footer owner.
+Keep Footer set to **Native** in `/zentui`; Starship or Hidden would replace the custom
+statusline. Accent Rail renders a one-line input in three rows including two spacer rows
+(OpenCode uses six); multiline text uses its own content rows. It does not duplicate
+model/effort metadata from the footer. OpenCode's empty metadata format
+is not a supported hiding mechanism: Zentui replaces it with the default format.
+Experimental thinking and Working-line ownership are disabled.
+`zentui.json` is a managed resource included in install, backup, rollback and sync.
+
 | Extension | Behavior | User surface |
 |---|---|---|
-| `present.ts` | Opt-in private RPC rewrite through `openai-codex/gpt-5.6-sol:low`; appends a display-only plain-language version | default off; `/present on\|off\|status` |
-| `fast-mode.ts` | Adds only Anthropic `speed: "fast"` and its beta; OAuth v0.3.2 merges required betas and blocks fine-grained streaming | `/fast` |
-| `statusline.ts` | Shows cwd, git branch, model, effort, context, cost, and Anthropic 5-hour/7-day limits | footer; `/limits` |
+| `fast-mode.ts` | Requests OpenAI/Codex Fast mode via `service_tier: "priority"`; never changes model or thinking effort | `/fast [on\|off\|status]` |
+| `statusline.ts` | Shows cwd, git branch, selected model, actual context capacity, effort, cost, and matching Anthropic/Codex quota windows | footer; `/limits` |
 
-`present.ts` is a Pi port of the display-only and fail-open design from
-[claudish-to-english](https://github.com/gvzdv/claudish-to-english). After `/present on`, a
-private ephemeral `--mode rpc --no-session` child uses the exact Pi executable and fixed
-`openai-codex/gpt-5.6-sol:low` model with no tools, project resources, or durable child
-session. The answer travels over RPC stdin rather than a plaintext prompt file. Session/leaf
-generation guards, latest-wins cancellation, exact fenced-code checks, literal
-number/URL/path/inline-code validation, bounded output, and process-group teardown prevent
-mutated or stale rewrites from attaching to another turn. Pi's settled `message_end` event is
-the text authority; present does not issue the redundant `get_last_assistant_text` request,
-which Pi 0.84.4 can answer without a valid text field after a successful settlement.
+Fast mode is opt-in per session (`/fast on`, or `PI_FAST_MODE=1` at startup). It applies
+only to `openai` Responses/Chat Completions and `openai-codex` Responses routes; Anthropic
+and other providers receive no fast-mode fields or headers. Switching to an unsupported
+provider hides the fast badge and suspends the override; switching back resumes it.
+`/fast off` stops overriding the tier, leaving provider/project defaults intact. Reload or a
+new session resets the toggle to the startup environment setting. `priority` is the
+[OpenAI Fast mode alias](https://developers.openai.com/api/docs/guides/fast-mode).
+Availability, extra API cost, and Codex credit usage depend on model/account; the badge
+means requested, not confirmed by the server. The extension does not adjust cost accounting
+or guarantee provider fallback, latency, or cache behavior.
 
-Literal validation asks that nothing disappears and that no quantity is invented; it does
-not compare how often a literal recurs, because merging two sentences that cite the same
-symbol is a rewrite doing its job. Bare `a/b` prose tokens (`yes/no`, `Pro/Max`) are not
-treated as paths. Both rules come from running the real pipeline over answers from this
-machine's history: exact repetition counts and prose slash tokens together caused every
-rejection observed, on rewrites that had lost nothing. The current choice comes from a
-quality-only, secret-screened benchmark of 24 real answers (each at most 6 KB) covering
-every Pi reasoning label on both models: Terra and Sol at `off`, `minimal`, `low`, `medium`,
-`high`, `xhigh`, and `max`, one production-faithful turn per call. Mechanical validity was
-flat-to-falling as effort rose — Sol 19/18/18/18/17/17 and Terra 17/18/15/15/17/16 from
-`off` through `xhigh` — so extra reasoning bought no reliability. `max` disqualified itself
-operationally on both models: 208–213-second calls, repeated 240-second timeouts, and the
-lowest validity of any arm. Tier-one blind reviews inside each model picked Sol `low`
-(perfect 5.00 fidelity, clarity, and instruction fit) and Terra `off`. In the decoded
-tier-two head-to-head, Sol `low` won 3 cases to Terra `off`'s 1 with 2 ties, and both
-localized fidelity losses — an ownership swap and dropped review-scope evidence — sat on
-the Terra side. Fidelity is the first decision axis, so production keeps Sol `low`. A
-static-retry experiment remains excluded: it rescued only 1 of 9 failures while adding
-latency and cost. Provider, model, and effort are derived
-into `PRESENT_MODEL` rather than restated; drift between the spawn argument and ownership
-check would fail every rewrite silently.
+Statusline quota follows the selected provider/model. Anthropic shows its account windows
+and the matching model-family bucket (including the API's short "Fable" name), even when its
+percentage equals the account-wide weekly usage. The footer omits provider-name prefixes;
+`/limits` retains them for diagnostics. Codex uses the server's window durations, including
+weekly-only plans. OpenAI API-key billing is shown as quota unavailable, not as a ChatGPT
+subscription. Model changes abort old requests and clear old gauges immediately. The cache
+is keyed by provider and, for Codex, its hashed account claim; Anthropic's opaque token
+rotates hourly and names no account, so its readings are keyed per provider instead of by
+credential. Entries carry the model and the hashed credential they were read under. A model
+switch reuses the account-wide windows and drops the other model's scoped bucket along with
+any severity that bucket raised — the model the reading was taken under decides that, not
+whether a window happened to be dropped — while an account-wide limit survives the switch.
+A reading whose credential no longer matches is marked and shown only while the request that
+settles it is in flight: a response replaces it, any failure removes it, its severity raises
+no alarm meanwhile, and a poll held back by backoff or throttle never displays it at all
+rather than risk showing another account's numbers. Returning to the credential a reading was
+taken under restores it. The cache expires after 30 minutes and
+stores no tokens. A `*` on a quota label means the numbers are not confirmed by the credential
+in hand: either the refresh failed and the last successful reading is shown, or the reading was
+taken under a credential this one cannot vouch for; `/limits` explains the failure. A 429 waits a fixed three minutes rather
+than escalating to the ten-minute step — the bucket is shared with other agents, so the wait
+is not this client's fault to escalate — and the boot retry is scheduled for the first moment
+backoff and throttle both allow a request, instead of expiring inside the first wait.
+RPC/headless children do not poll.
+The Anthropic poll sends `user-agent: claude-code/<version>`: that endpoint gates on the
+agent prefix rather than on request rate, and every other agent (including Node's `fetch`
+default) shares one bucket that answers 429 within a couple of reads, so without the header
+the footer stays at `limits n/a` no matter how long the backoff waits.
+Codex uses its authenticated usage-dashboard endpoint; a changed server response degrades to
+unavailable rather than invented percentages. Official rate-window semantics are documented
+in [Codex account rate limits](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt).
 
-Because the pipeline is fail-open, every way a turn can end without a rewrite used to be a
-bare `return`, and a present that produced nothing was indistinguishable from a present that
-was switched off. That opacity is why a broken literal validator went unnoticed while the
-visible knobs got tuned instead. Each exit is now named, counted, and readable with
-`/present status`: `source-unsettled`, `source-too-short` (which reports an unterminated
-fence separately, since one can never be validated), `source-too-large`, `superseded`,
-`child-invalid`, `child-error`, `result-empty`, `result-too-large`, `fences-changed`,
-`literals-changed` (which names the literals lost or invented), `failed`, and `ok`. Counts
-are session-scoped and never written to disk, and detail text passes through the shared
-credential redactor before it can reach the screen. The custom
-entry shows per-rewrite model/token/cost metadata but does not add that usage to parent
-session totals. The original answer remains authoritative; any failure shows nothing.
+Present and its private RPC helpers have been removed. Answers are no longer automatically
+sent to a second model for display-only rewriting; use `/wait-what` when an explanation needs
+to be clearer. Historical Present session entries are not deleted or migrated. Their recorded
+cost still contributes to the footer total, but the separate `p … tok` segment is gone.
 
 ### Workspace rewind
 
@@ -364,6 +348,11 @@ User-facing commands:
 - `/rewind` — manage file checkpoints directly: restore code, undo the last restore, or inspect coverage.
 
 Checkpoints are automatic. There is no separate manual checkpoint command.
+Code restore is offered only for the exact checkpointed user entry (never an
+ancestor's state). Shutdown drains accepted backend work without installing process
+signal handlers inside Pi; forced exit/crash leaves an advisory lock that must be
+removed manually. See `extensions/tree-rewind/README.md` for lifecycle, retention and
+index-format details.
 
 Develop it under `extensions/tree-rewind/`, run its backend tests, then apply the
 managed config and `/reload`. The old standalone repository is historical only and
@@ -372,15 +361,16 @@ is not part of restore.
 ## Skills
 
 Skills are loaded only when their descriptions match the task or a prompt explicitly
-requests them.
+requests them. In addition to the six local skills below, the Context7 package supplies
+`context7-docs` for current library documentation and code examples.
 
 | Skill | Use case |
 |---|---|
-| `code-review` | Review changes since a ref along Standards and Spec axes using parallel foreground `explore` children |
+| `code-review` | Review changes since a ref along Standards and Spec axes using parallel Explore agents |
 | `domain-modeling` | Sharpen project terminology, maintain `CONTEXT.md`, and record gated ADRs |
 | `grilling` | Stress-test the user's plan or decision through a design-tree interview |
 | `handoff` | Compact the current session into a document another agent can continue from |
-| `subagent` | Guidance for RPC profiles, background scheduling, continuation, and the four subagent controls |
+| `subagent` | Agent delegation, steering/resume, workflows and background shell job guidance |
 | `teach` | Run a stateful, multi-session learning workspace |
 
 The intentionally removed skills remain recoverable from git commit `937ea32`; they
@@ -405,19 +395,18 @@ For a stack-neutral project bootstrap workflow with a concrete Go service baseli
 
 ## Typical workflow
 
-1. Start Pi in the project directory; keep default Auto or choose another policy with `/mode`.
+1. Start Pi in the project directory; approve project resource loading if Pi asks.
 2. Describe the task normally. Use `/grill` first when the design is unclear.
-3. Watch assumptions, mode/operation confirmations, and the todo widget while Pi
+3. Watch unresolved decisions, agent activity, and the todo widget while Pi
    works.
 4. Use `/review` before merging non-trivial changes.
-5. Use `/wait-what` when an explanation does not land. Enable `/present on` only when
-   sending future long answers to OpenAI for a display-only rewrite is acceptable.
+5. Use `/wait-what` when an explanation does not land.
 6. Use `/handoff` before stopping an unfinished task.
 7. Use `/rewind` only after previewing the restore plan.
 
 ## Apply and capture changes
 
-The six managed resources are declared in `scripts/managed-paths.txt`. Apply a
+The eight managed resources are declared in `scripts/managed-paths.txt`. Apply a
 repository change to the live setup without runtime or package work:
 
 ```bash
@@ -488,47 +477,47 @@ This repository deliberately excludes:
 
 The repository describes behavior. It is not a backup of conversations or secrets.
 
-## Security posture and tests
+After Pi exits, `scrub-session-secrets.sh` can redact known credential families from
+session text and background `.output` logs. Default discovery resolves a symlinked home,
+prunes `Library` and `node_modules`, and includes extensionless rewind blobs; it does not
+add general JSON files such as `auth.json`. Structured families match the inline redactor,
+including Google OAuth, Stripe and legacy OpenAI keys with at least 32 suffix characters.
+The unlabelled AWS-40 heuristic remains inline-only: offline scrub deliberately leaves such
+ambiguous strings unchanged to avoid damaging ordinary archived data. This is a documented
+coverage gap, not a guarantee that AWS secrets are absent. Each changed file gets a unique
+mode-0600 plaintext backup. `~/.pi/agent/scrub-backups.txt` is cumulative and deduplicated,
+so a later run cannot hide an earlier backup. Paths containing newlines are refused because
+that cleanup list is line-delimited. A detector/replacer mismatch fails without changing the
+source. Verify the redacted files, delete every listed backup, then rotate exposed credentials.
 
-This is an **accident-resistant, human-supervised local setup**, not a sandbox for hostile
-repositories or prompt injection. Pi and global extensions run with the user's host
-authority. The parent's Bash network access is unrestricted, while every subagent is offline
-unless the user approved that activation; whole-process isolation is required for untrusted or
-unattended work, as documented by Pi itself.
+## Verification
 
-Focused policy tests use Node's built-in runner:
+`./doctor.sh` checks managed configuration parity, exact package versions, package patch
+checksums, existing utility regressions and the tree-rewind backend. It also runs
+`scripts/package-smoke.mjs` against a private fixture home/config and a fake zero-cost
+provider, exercising the installed package combination without reading real credentials.
 
-```bash
-node --experimental-strip-types --test tests/*.test.mjs
-```
+Rewind queries the live package registries before preparing/applying file restore or undo.
+It refuses while any agent/workflow or background job is active, including queued/nested
+agents, or if package activity cannot be determined. It never stops jobs on the user's behalf.
+This query coordinates one Pi session; it is not a global filesystem lock against external
+programs or other Pi processes. Child worktrees and shell writes outside the project do not
+become universally covered by the parent's checkpoints.
 
-They cover the five-mode decision/persistence/tool-restoration matrix, authority-sensitive
-Auto command prompts, canonical/symlink paths, Seatbelt profile generation, runtime snapshot
-projection, resource precedence, bounded skill prompts, safe spill fallback, RPC
-framing/dialog/process teardown, parent-scoped durable child state, fixed capability profiles,
-bounded/redacted child reports, private presentation literal/fence/ownership/cancellation
-behavior, repository portability, and
-installer rollback/runtime-state preservation. Bundled rewind backend tests run through
-`npm --prefix extensions/tree-rewind test`. Real Seatbelt e2e must run outside an already
-sandboxed parent process.
+Redaction is best effort. Raw streams, unknown secret formats, binary data and external
+program effects are outside its guarantee. Keepalive tests and mock model tests do not
+prove real provider cache residency.
 
 ## Known trade-offs
 
-- `ask-user.ts`, `todos.ts`, `goal.ts`, and `subagent.ts` register model tools, so their
-  schemas consume context on every turn even when unused.
-- The explicit default tool set also enables `grep`, `find`, and `ls`: Plan/Manual gain direct
-  read-only search at the cost of three additional built-in schemas.
-- Context7's two tool schemas remain recurring prompt cost; its broad package skill is filtered
-  because the schemas already carry the resolve/query protocol, while `/c7-docs` stays explicit.
-- After `/present on`, `present.ts` sends each eligible long answer to OpenAI in a private
-  ephemeral RPC call. Its per-rewrite cost is displayed but not added to parent totals; the
-  feature resets to off on every session start/reload.
-- Anthropic cache keepalive can make up to six hidden cache-read requests per idle live
-  conversation; those requests are bounded but absent from Pi's displayed session cost.
-- `tree-rewind` spends disk I/O on automatic checkpoints but does not consume model
-  context. Always inspect coverage. A very long current session has no hard byte cap;
-  SIGKILL can leave a fail-closed lock requiring confirmed manual removal.
-- `paste-image-attach.ts` touches a private TUI paste path and should be checked after Pi
-  upgrades.
-- `compaction-prune.ts` and `sandbox-bash.ts` were verified against Pi 0.84.4 internals;
-  re-audit them after major upgrades.
+- Package tools add their schemas to each model request; more capabilities cost context.
+  Goal, workflow and Fusion tools are deliberately kept; dropping them would save a few
+  thousand tokens per request but was declined. Spill's inline budget (32 KiB) and the
+  rewind index format were tuned instead; per-session private checkpoint writes remain
+  O(N) by design (synchronous durability before tools).
+- Upstream package updates stay pinned until their APIs and local patches are rechecked.
+- A main-session checkpoint is not a backup of every child worktree or arbitrary host file.
+- Background shell processes stop on Pi reload/shutdown.
+- Old todo/agent state is retained as history, not converted.
+- The permission/sandbox layer is intentionally retired; output redaction and rewind remain.
+- Migration and rollback details: [Package migration](docs/package-migration.md).

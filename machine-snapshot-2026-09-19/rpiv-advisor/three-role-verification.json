@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "piVersion": "0.85.1",
+  "package": "@juicesharp/rpiv-advisor@2.9.0",
+  "mainModel": "openai-codex/gpt-6-astra",
+  "mainEffort": "high",
+  "reviewer": "anthropic/claude-fable-5-1",
+  "effort": "medium",
+  "finalReviewer": {
+    "model": "openai-codex/gpt-6-astra",
+    "thinking": "max",
+    "tools": [
+      "read",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "isolated": true
+  },
+  "nativeMediumPayloads": 1,
+  "extensionLoadErrors": 0,
+  "childExclusions": [
+    "general-purpose",
+    "Explore",
+    "Plan"
+  ],
+  "modelToggleVerified": true,
+  "customProviderDispatches": 1,
+  "toolsOnReviewer": [],
+  "syntheticResponse": "The plan is correct: 1 + 1 = 2, and no files or tools are needed — proceed and report 2.",
+  "providerSource": "/Users/user/.pi/agent/local-packages/pi-anthropic-oauth-plus/src/index.ts",
+  "usage": {
+    "input": 4,
+    "output": 38,
+    "cacheRead": 0,
+    "cacheWrite": 2335
+  }
+}

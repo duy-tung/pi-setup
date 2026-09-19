@@ -1,9 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { targetTrackedFiles } from "./git.js";
+import { checkpointStatePath, readCheckpointState, validProjectPath } from "./checkpoint-store.js";
+import { readRecovery, recoveryProtection, removeCompletedRecovery } from "./recovery.js";
+import { PrivateWriteError } from "./storage.js";
 import { withLock } from "./lock.js";
+import type { BackendLifetime } from "./backend-lifetime.js";
 import { markOrigin } from "./reaper.js";
 import { ShadowRepo, type DiffRecord } from "./shadow.js";
 import {
@@ -16,6 +20,8 @@ import {
   type RestorePlan,
   type WorkspaceSnapshot,
 } from "./types.js";
+
+export interface WorkspaceOptions { lifetime?: BackendLifetime; signal?: AbortSignal }
 
 type Kind = "file" | "symlink" | "gitlink" | "absent";
 
@@ -153,6 +159,7 @@ export class Workspace {
   readonly coverage: Coverage = {
     unrepresentable: [],
     skippedNested: [],
+    degradedParents: [],
     defaultExcluded: [],
     caseInsensitive: false,
     nestedCount: 0,
@@ -162,14 +169,20 @@ export class Workspace {
   readonly storeDir: string;
   private unrepresentable = new Set<string>();
   private lockPath: string;
+  private readonly lifetime?: BackendLifetime;
+  private readonly primeSignal?: AbortSignal;
+  private readonly leaseOwner = randomUUID();
 
-  private constructor(cwd: string) {
+  private constructor(cwd: string, options: WorkspaceOptions) {
     this.cwd = cwd;
     this.storeDir = storeDirFor(cwd);
     this.lockPath = join(this.storeDir, "snapshot.lock");
+    this.lifetime = options.lifetime;
+    this.primeSignal = options.signal;
   }
 
-  static async open(cwd: string): Promise<Workspace> {
+  static async open(cwd: string, options: WorkspaceOptions = {}): Promise<Workspace> {
+    options.signal?.throwIfAborted();
     const real = (() => {
       try {
         return realpathSync(cwd);
@@ -177,13 +190,13 @@ export class Workspace {
         return cwd;
       }
     })();
-    const ws = new Workspace(real);
+    const ws = new Workspace(real, options);
     mkdirSync(ws.storeDir, { recursive: true });
     // The store is named by a hash, so without this nothing on disk says which
     // project it belongs to — and the reaper cannot tell an abandoned store
     // from a live one it simply has not seen this session.
     markOrigin(ws.storeDir, real);
-    const root = new ShadowRepo(real, ws.storeDir, "root");
+    const root = new ShadowRepo(real, ws.storeDir, "root", options.signal);
     ws.repos.set(ROOT, root);
     return ws;
   }
@@ -194,8 +207,7 @@ export class Workspace {
    * background while the model is thinking.
    */
   async prime(): Promise<void> {
-    await withLock(
-      this.lockPath,
+    await this.withStoreLock(
       async () => {
         const root = this.repos.get(ROOT)!;
         // init mutates the shared shadow config/index, so it belongs under the
@@ -209,7 +221,7 @@ export class Workspace {
         await this.discoverNested(root, ROOT, 0);
         await this.scanUnrepresentable();
       },
-      { timeoutMs: PRIME_LOCK_TIMEOUT_MS },
+      PRIME_LOCK_TIMEOUT_MS, this.primeSignal,
     );
   }
 
@@ -233,7 +245,7 @@ export class Workspace {
         this.coverage.skippedNested.push(display);
         continue;
       }
-      const repo = new ShadowRepo(abs, this.storeDir, `n-${hash(display)}`);
+      const repo = new ShadowRepo(abs, this.storeDir, `n-${hash(display)}`, this.primeSignal);
       await repo.init();
       await repo.stage([], { reseed: true });
       this.repos.set(display, repo);
@@ -250,7 +262,7 @@ export class Workspace {
   private async scanUnrepresentable(): Promise<void> {
     if (!this.coverage.caseInsensitive) return;
     for (const [sub, repo] of this.repos) {
-      const tracked = (await targetTrackedFiles(repo.worktree)) ?? (await repo.trackedPaths());
+      const tracked = (await targetTrackedFiles(repo.worktree, this.primeSignal)) ?? (await repo.trackedPaths());
       const byLower = new Map<string, string[]>();
       for (const p of tracked) {
         const k = p.toLowerCase();
@@ -262,6 +274,29 @@ export class Workspace {
       }
     }
     this.coverage.unrepresentable = [...this.unrepresentable];
+  }
+
+  /** Find a nested Git worktree that exists on disk but has not produced a gitlink yet. */
+  private undiscoveredNested(display: string): string | null {
+    let candidate = dirname(display);
+    while (candidate !== "." && candidate !== "") {
+      if (this.repos.has(candidate)) return null;
+      if (existsSync(join(this.cwd, candidate, ".git"))) return candidate;
+      const parent = dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    return null;
+  }
+
+  /** Remove nested worktrees deleted since prime so one stale repo cannot poison every snapshot. */
+  private dropMissingNested(): void {
+    for (const [sub, repo] of this.repos) {
+      if (sub === ROOT || existsSync(repo.worktree)) continue;
+      this.repos.delete(sub);
+      this.coverage.nestedCount = Math.max(0, this.coverage.nestedCount - 1);
+      if (!this.coverage.skippedNested.includes(sub)) this.coverage.skippedNested.push(sub);
+    }
   }
 
   /** Which shadow repo owns a path relative to the project root. */
@@ -282,8 +317,18 @@ export class Workspace {
     forceTrack: Iterable<string>,
     ref?: { sessionId: string; entryId: string },
   ): Promise<WorkspaceSnapshot> {
+    if (ref) this.markSessionActive(ref.sessionId);
+    this.dropMissingNested();
     const byRepo = new Map<string, string[]>();
     for (const display of forceTrack) {
+      // Absolute paths belong to OutsideStore. Ignore stale pre-fix state here
+      // rather than passing a fatal pathspec to every later checkpoint.
+      if (isAbsolute(display)) continue;
+      const undiscovered = this.undiscoveredNested(display);
+      if (undiscovered !== null) {
+        if (!this.coverage.skippedNested.includes(undiscovered)) this.coverage.skippedNested.push(undiscovered);
+        continue;
+      }
       const { repo, path } = this.owner(display);
       byRepo.set(repo, (byRepo.get(repo) ?? []).concat(path));
     }
@@ -291,6 +336,10 @@ export class Workspace {
     for (const [sub, repo] of this.repos) {
       const parentCommit = parent?.[sub];
       out[sub] = await repo.commit(parentCommit ? [parentCommit] : [], message, byRepo.get(sub) ?? []);
+      if (repo.consumeMissingParentRecovery()) {
+        const display = sub || "project root";
+        if (!this.coverage.degradedParents.includes(display)) this.coverage.degradedParents.push(display);
+      }
       // The ref is written inside the lock: a commit that sits unreferenced for
       // even a moment can be pruned by another session's maintenance.
       if (ref) await repo.setRef(`refs/pi/${ref.sessionId}/${ref.entryId}`, out[sub]);
@@ -307,15 +356,116 @@ export class Workspace {
     forceTrack: Iterable<string> = [],
     opts: { ref?: { sessionId: string; entryId: string }; lockTimeoutMs?: number } = {},
   ): Promise<WorkspaceSnapshot> {
-    return withLock(
-      this.lockPath,
+    return this.withStoreLock(
       () => this.snapshotLocked(parent, message, forceTrack, opts.ref),
-      opts.lockTimeoutMs == null ? {} : { timeoutMs: opts.lockTimeoutMs },
+      opts.lockTimeoutMs,
     );
   }
 
+  private async unknownPathsLocked(): Promise<string[]> {
+    // Partial add can both omit a new file and retain an old index blob for a
+    // changed unreadable file. Neither is a trustworthy guarded checkpoint.
+    if ([...this.repos.values()].some(repo => repo.captureIncomplete)) {
+      throw new Error("worktree capture incomplete; unreadable or unindexed paths cannot form a safe checkpoint");
+    }
+    const unknown: string[] = [];
+    try {
+      for (const [sub, repo] of this.repos) {
+        for (const path of await repo.ignoredPaths()) {
+          const display = sub ? `${sub}/${path}` : path;
+          if (!validProjectPath(display, true)) continue;
+          unknown.push(display);
+          if (unknown.length > 4096) return [""];
+        }
+      }
+    } catch {
+      // An incomplete inventory is not proof of absence. Concrete tree entries
+      // stay restorable; ambiguous deletions fail closed at plan time.
+      return [""];
+    }
+    return unknown;
+  }
+
+  private async absentPathsLocked(snapshot: WorkspaceSnapshot, paths: Iterable<string>): Promise<string[]> {
+    const absent: string[] = [];
+    for (const display of paths) {
+      if (!validProjectPath(display) || !parentsAreReal(this.cwd, display) || this.undiscoveredNested(display)) continue;
+      try { lstatSync(join(this.cwd, display)); continue; }
+      catch (error) {
+        if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
+      }
+      const owner = this.owner(display);
+      const repo = this.repos.get(owner.repo);
+      if (repo && snapshot[owner.repo] && owner.path && !await repo.entryAt(snapshot[owner.repo], owner.path)) absent.push(display);
+    }
+    return absent;
+  }
+
+  async snapshotWithCoverage(
+    parent: WorkspaceSnapshot | null,
+    message: string,
+    forceTrack: Iterable<string> = [],
+    opts: {
+      ref?: { sessionId: string; entryId: string };
+      lockTimeoutMs?: number;
+      validate?: () => void;
+      publish?: (captured: { snapshot: WorkspaceSnapshot; unknown: string[]; absent: string[] }) => void | Promise<void>;
+    } = {},
+  ): Promise<{ snapshot: WorkspaceSnapshot; unknown: string[]; absent: string[] }> {
+    const forced = [...forceTrack];
+    return this.withStoreLock(async () => {
+      opts.validate?.();
+      const snapshot = await this.snapshotLocked(parent, message, forced, opts.ref);
+      const captured = {
+        snapshot,
+        unknown: await this.unknownPathsLocked(),
+        absent: await this.absentPathsLocked(snapshot, forced),
+      };
+      await opts.publish?.(captured);
+      return captured;
+    }, opts.lockTimeoutMs);
+  }
+
+  /** Capture the one named preimage and publish its ref/metadata under one lock. */
+  async backfillFile(
+    snapshot: WorkspaceSnapshot,
+    display: string,
+    ref: { sessionId: string; entryId: string } | undefined,
+    publish: (snapshot: WorkspaceSnapshot, absent: boolean) => void,
+    unknown = true,
+  ): Promise<void> {
+    if (!validProjectPath(display) || this.unrepresentable.has(display) || this.undiscoveredNested(display)) {
+      throw new Error("project path cannot be checkpointed safely");
+    }
+    await this.withStoreLock(async () => {
+      const owner = this.owner(display);
+      const repo = this.repos.get(owner.repo);
+      const before = snapshot[owner.repo];
+      if (!repo || !before || !owner.path) throw new Error("no checkpoint for this file's repository");
+      if (ref) {
+        for (const [sub, commit] of Object.entries(snapshot)) {
+          const current = await this.repos.get(sub)?.refValue(`refs/pi/${ref.sessionId}/${ref.entryId}`);
+          if (current && current !== commit) throw new Error("checkpoint changed in another session instance; reload before editing");
+        }
+      }
+      const captured = await repo.backfillFile(before, owner.path, unknown);
+      const patched = captured.commit === before ? snapshot : { ...snapshot, [owner.repo]: captured.commit };
+      if (ref && patched !== snapshot) await this.replaceSnapshotRefLocked(patched, snapshot, ref.sessionId, ref.entryId);
+      try {
+        publish(patched, captured.absent);
+      } catch (error) {
+        // After rename, private metadata already names the patched commit.
+        // Keep its ref (and its old parent) reachable even though the tool stays blocked.
+        if (!(error instanceof PrivateWriteError && error.published) && ref && patched !== snapshot) {
+          await this.replaceSnapshotRefLocked(snapshot, patched, ref.sessionId, ref.entryId);
+        }
+        throw error;
+      }
+    }, 5000);
+  }
+
   async setSnapshotRef(snapshot: WorkspaceSnapshot, sessionId: string, entryId: string): Promise<void> {
-    await withLock(this.lockPath, async () => {
+    await this.withStoreLock(async () => {
       for (const [sub, commit] of Object.entries(snapshot)) {
         const repo = this.repos.get(sub);
         if (!repo) throw new Error(`snapshot repo is no longer available: ${sub || "root"}`);
@@ -324,7 +474,8 @@ export class Workspace {
     });
   }
 
-  private async replaceSnapshotRefLocked(
+  /** Caller holds snapshot.lock; used by durable Undo finalization. */
+  async replaceSnapshotRefLocked(
     snapshot: WorkspaceSnapshot,
     previous: WorkspaceSnapshot | undefined,
     sessionId: string,
@@ -369,13 +520,28 @@ export class Workspace {
     sessionId: string,
     entryId: string,
   ): Promise<void> {
-    await withLock(this.lockPath, () => this.replaceSnapshotRefLocked(snapshot, previous, sessionId, entryId));
+    await this.withStoreLock(() => this.replaceSnapshotRefLocked(snapshot, previous, sessionId, entryId));
   }
 
+  /** Caller holds snapshot.lock. */
+  async deleteSnapshotRefLocked(sessionId: string, entryId: string): Promise<void> {
+    for (const repo of this.repos.values()) await repo.deleteRef(`refs/pi/${sessionId}/${entryId}`);
+  }
+
+  /** Retiring a preview/pending ref compensates an accepted job, so it is admitted during close. */
   async deleteSnapshotRef(sessionId: string, entryId: string): Promise<void> {
-    await withLock(this.lockPath, async () => {
-      for (const repo of this.repos.values()) await repo.deleteRef(`refs/pi/${sessionId}/${entryId}`);
-    });
+    await this.withStoreLock(() => this.deleteSnapshotRefLocked(sessionId, entryId), undefined, undefined, true);
+  }
+
+  async sameTrees(first: WorkspaceSnapshot, second: WorkspaceSnapshot): Promise<boolean> {
+    if (Object.keys(first).length !== Object.keys(second).length) return false;
+    for (const [sub, commit] of Object.entries(first)) {
+      if (!second[sub]) return false;
+      if (commit === second[sub]) continue;
+      const repo = this.repos.get(sub);
+      if (!repo || (await repo.diff(commit, second[sub])).length > 0) return false;
+    }
+    return true;
   }
 
   /** Nested repos created after prime (the agent ran `git clone` / `git init`)
@@ -422,13 +588,28 @@ export class Workspace {
       const a = from[sub];
       const b = to[sub];
       if (!b) {
-        if (sub) items.push(unprotectedItem(sub, sub, "nested repo has no checkpoint at this point"));
+        if (sub) items.push({ ...unprotectedItem(sub, sub, "nested repo has no checkpoint at this point"), coverageOnly: true });
         continue;
       }
       if (!a) continue;
+      const targetPaths = this.coverage.caseInsensitive ? await repo.pathsAt(b) : [];
       for (const rec of await repo.diff(a, b)) {
-        const item = this.classify(sub, rec);
+        const item = this.classify(sub, rec, to);
         if (item) items.push(item);
+        if (item?.action === "delete" && this.coverage.caseInsensitive) {
+          const targetCase = targetPaths.find(path => path !== rec.path && path.toLowerCase() === rec.path.toLowerCase());
+          const target = targetCase ? await repo.entryAt(b, targetCase) : null;
+          if (targetCase && target) {
+            items.push({
+              repo: sub,
+              path: targetCase,
+              display: sub ? `${sub}/${targetCase}` : targetCase,
+              action: "restore",
+              targetSha: target.sha,
+              targetMode: target.mode,
+            });
+          }
+        }
       }
     }
 
@@ -440,13 +621,13 @@ export class Workspace {
 
     const declared = new Set(items.filter((i) => i.action === "unprotected").map((i) => i.display));
     for (const sub of this.coverage.skippedNested) {
-      if (!declared.has(sub)) items.push(unprotectedItem(sub, sub, "nested repo not checkpointed"));
+      if (!declared.has(sub)) items.push({ ...unprotectedItem(sub, sub, "nested repo not checkpointed"), coverageOnly: !Object.hasOwn(to, sub) });
     }
 
     return { items: subsumeUnderTypeChanges(items), from, to };
   }
 
-  private classify(sub: string, rec: DiffRecord): PlanItem | null {
+  private classify(sub: string, rec: DiffRecord, target: WorkspaceSnapshot): PlanItem | null {
     const display = sub ? `${sub}/${rec.path}` : rec.path;
 
     // A gitlink diff at the parent level is not ours to apply. If the nested
@@ -455,7 +636,7 @@ export class Workspace {
     // in the preview rather than vanish.
     if (rec.srcMode === "160000" || rec.dstMode === "160000") {
       if (this.repos.has(display)) return null;
-      return unprotectedItem(sub, display, "nested repo not checkpointed");
+      return { ...unprotectedItem(sub, display, "nested repo not checkpointed"), coverageOnly: !Object.hasOwn(target, display) };
     }
 
     if (this.unrepresentable.has(display)) {
@@ -541,8 +722,23 @@ export class Workspace {
     };
   }
 
-  async withStoreLock<T>(fn: () => Promise<T> | T, timeoutMs?: number): Promise<T> {
-    return withLock(this.lockPath, async () => fn(), timeoutMs == null ? {} : { timeoutMs });
+  /** Target bytes for a plan item owned by one of this workspace's shadow repos.
+   *  `"large"` when the blob exceeds `maxBytes`: the size is checked first so
+   *  a preview never materialises content it is going to refuse to count. */
+  async targetBlob(item: PlanItem, maxBytes = Number.POSITIVE_INFINITY): Promise<Buffer | null | "large"> {
+    if (!item.targetSha) return null;
+    const repo = this.repos.get(item.repo);
+    if (!repo) return null;
+    if (Number.isFinite(maxBytes)) {
+      const size = await repo.blobSize(item.targetSha);
+      if (size === null) return null;
+      if (size > maxBytes) return "large";
+    }
+    return repo.catBlob(item.targetSha);
+  }
+
+  async withStoreLock<T>(fn: () => Promise<T> | T, timeoutMs?: number, signal?: AbortSignal, compensating = false): Promise<T> {
+    return withLock(this.lockPath, async () => fn(), { timeoutMs, signal, lifetime: this.lifetime, compensating });
   }
 
   /** Re-snapshot and re-plan inside the same lock that performs the writes.
@@ -554,16 +750,25 @@ export class Workspace {
     forceTrack: Iterable<string>,
     opts: { includeTypeChanges?: boolean },
     refs: { sessionId?: string; pendingEntry: string; previousUndo?: WorkspaceSnapshot; publishEntry?: string; keepPending?: boolean },
-    decorate: (worktreePlan: RestorePlan, now: WorkspaceSnapshot) => RestorePlan,
+    decorate: (worktreePlan: RestorePlan, now: WorkspaceSnapshot) => RestorePlan | Promise<RestorePlan>,
     shouldApply: (plan: RestorePlan) => boolean,
-    onUndo: (now: WorkspaceSnapshot, plan: RestorePlan) => void,
-    whileLocked?: (result: ApplyResult, plan: RestorePlan) => void,
+    onUndo: (now: WorkspaceSnapshot, plan: RestorePlan) => void | Promise<void>,
+    whileLocked?: (result: ApplyResult, plan: RestorePlan) => void | Promise<void>,
+    beforeSnapshot?: () => void | Promise<void>,
+    onNoop?: (plan: RestorePlan) => void | Promise<void>,
   ): Promise<{ plan: RestorePlan; result: ApplyResult; applied: boolean; undoSnapshot: WorkspaceSnapshot }> {
-    return withLock(this.lockPath, async () => {
+    return this.withStoreLock(async () => {
+      await beforeSnapshot?.();
       const ref = refs.sessionId ? { sessionId: refs.sessionId, entryId: refs.pendingEntry } : undefined;
-      const now = await this.snapshotLocked(parent, "pre-apply", forceTrack, ref);
-      const plan = decorate(await this.buildPlan(now, target), now);
+      const forced = [...forceTrack];
+      const now = await this.snapshotLocked(parent, "pre-apply", forced, ref);
+      const plan = await decorate({
+        ...await this.buildPlan(now, target),
+        projectUnknownFrom: await this.unknownPathsLocked(),
+        projectAbsentFrom: await this.absentPathsLocked(now, forced),
+      }, now);
       if (!shouldApply(plan)) {
+        await onNoop?.(plan);
         if (refs.sessionId && !refs.keepPending) {
           for (const repo of this.repos.values()) await repo.deleteRef(`refs/pi/${refs.sessionId}/${refs.pendingEntry}`).catch(() => {});
         }
@@ -577,12 +782,20 @@ export class Workspace {
       if (refs.sessionId && refs.publishEntry) {
         await this.replaceSnapshotRefLocked(now, refs.previousUndo, refs.sessionId, refs.publishEntry);
       }
-      onUndo(now, plan);
+      try {
+        await onUndo(now, plan);
+      } catch (error) {
+        if (refs.sessionId && refs.publishEntry) {
+          if (refs.previousUndo) await this.replaceSnapshotRefLocked(refs.previousUndo, now, refs.sessionId, refs.publishEntry);
+          else await this.deleteSnapshotRefLocked(refs.sessionId, refs.publishEntry);
+        }
+        throw error;
+      }
       const result = await this.applyLocked(
         { ...plan, items: plan.items.filter((item) => item.repo !== OUTSIDE) },
         opts,
       );
-      whileLocked?.(result, plan);
+      await whileLocked?.(result, plan);
       if (refs.sessionId && !refs.keepPending) {
         for (const repo of this.repos.values()) await repo.deleteRef(`refs/pi/${refs.sessionId}/${refs.pendingEntry}`).catch(() => {});
       }
@@ -599,7 +812,7 @@ export class Workspace {
     // with another session's snapshot rewrote the shared index between
     // read-tree and checkout-index, and the "restore" silently wrote back the
     // *current* content while reporting success (reproduced).
-    return withLock(this.lockPath, async () => {
+    return this.withStoreLock(async () => {
       const result = await this.applyLocked(plan, opts);
       whileLocked?.(result);
       return result;
@@ -726,6 +939,62 @@ export class Workspace {
     return dirSize(this.storeDir);
   }
 
+  private leasePath(sessionId: string): string {
+    return join(this.storeDir, "sessions", `${hash(sessionId)}.json`);
+  }
+
+  /** Caller holds snapshot.lock; publication shares the workspace's generation guard. */
+  markSessionActive(sessionId: string): void {
+    const dir = join(this.storeDir, "sessions");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = this.leasePath(sessionId);
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(temp, JSON.stringify({ sessionId, pid: process.pid, host: hostname(), time: Date.now(), owner: this.leaseOwner }), { mode: 0o600 });
+    renameSync(temp, path);
+  }
+
+  /** Caller holds snapshot.lock so a successor cannot replace the lease mid-check. */
+  releaseSession(sessionId: string): void {
+    const path = this.leasePath(sessionId);
+    try {
+      const lease = JSON.parse(readFileSync(path, "utf8"));
+      if (lease?.sessionId === sessionId && lease?.pid === process.pid && lease?.host === hostname() && lease?.owner === this.leaseOwner) {
+        rmSync(path, { force: true });
+      }
+    } catch {
+      /* absent or foreign lease */
+    }
+  }
+
+  private activeSessions(): Set<string> {
+    const active = new Set<string>();
+    const dir = join(this.storeDir, "sessions");
+    let names: string[] = [];
+    try { names = readdirSync(dir); } catch { return active; }
+    for (const name of names) {
+      if (!/^[0-9a-f]{16}\.json$/.test(name)) continue;
+      const path = join(dir, name);
+      try {
+        const lease = JSON.parse(readFileSync(path, "utf8"));
+        if (typeof lease?.sessionId !== "string" || typeof lease?.pid !== "number" || typeof lease?.host !== "string") continue;
+        if (lease.host === hostname()) {
+          try {
+            process.kill(lease.pid, 0);
+            active.add(lease.sessionId);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "EPERM") active.add(lease.sessionId);
+            else rmSync(path, { force: true });
+          }
+        } else if (typeof lease.time === "number" && Date.now() - lease.time < 24 * 60 * 60_000) {
+          active.add(lease.sessionId);
+        }
+      } catch {
+        /* corrupt lease cannot claim retention authority */
+      }
+    }
+    return active;
+  }
+
   /**
    * Drop checkpoints from sessions we no longer keep, then repack. Bounded by
    * both age and count so neither a long-lived project nor a burst of short
@@ -737,34 +1006,54 @@ export class Workspace {
    * covers that case.
    */
   async maintain(
-    keep: { sessionId?: string; maxSessions?: number; maxAgeDays?: number; maxBytes?: number } = {},
+    keep: { sessionId?: string; maxSessions?: number; maxAgeDays?: number; maxBytes?: number; recentSessionGraceMs?: number; lockTimeoutMs?: number } = {},
+    lifetime = this.lifetime,
   ): Promise<{ prunedSessions: string[]; packed: boolean; bytesBefore: number; bytesAfter: number }> {
     // Under the store lock: gc must never run while another session is mid-
     // snapshot or mid-apply — their objects are in flight and a concurrent
     // prune collected them (measured).
-    return withLock(this.lockPath, () => this.maintainLocked(keep));
+    return withLock(this.lockPath, () => this.maintainLocked(keep), { timeoutMs: keep.lockTimeoutMs, lifetime });
   }
 
   private async maintainLocked(
-    keep: { sessionId?: string; maxSessions?: number; maxAgeDays?: number; maxBytes?: number },
+    keep: { sessionId?: string; maxSessions?: number; maxAgeDays?: number; maxBytes?: number; recentSessionGraceMs?: number },
   ): Promise<{ prunedSessions: string[]; packed: boolean; bytesBefore: number; bytesAfter: number }> {
     const maxSessions = keep.maxSessions ?? 20;
     const maxAgeDays = keep.maxAgeDays ?? 30;
     const maxBytes = keep.maxBytes ?? 2 * 1024 ** 3;
+    const recentSessionGraceMs = keep.recentSessionGraceMs ?? 24 * 60 * 60_000;
     const bytesBefore = this.storeBytes();
+    const protection = recoveryProtection(this.storeDir);
+    if (protection.unsafe) return { prunedSessions: [], packed: false, bytesBefore, bytesAfter: bytesBefore };
 
     const root = this.repos.get(ROOT)!;
-    const sessions = [...(await root.sessionRefs())].sort((a, b) => b[1] - a[1]);
-    const cutoff = Date.now() / 1000 - maxAgeDays * 86400;
+    const sessions = [...(await root.sessionRefs())];
+    for (const entry of sessions) {
+      const record = readRecovery(this.storeDir, this.cwd, entry[0]);
+      entry[1] = Math.max(entry[1], (record?.undo?.timestamp ?? 0) / 1000);
+    }
+    sessions.sort((a, b) => b[1] - a[1]);
+    const nowSeconds = Date.now() / 1000;
+    const cutoff = nowSeconds - maxAgeDays * 86400;
+    const countCutoff = nowSeconds - recentSessionGraceMs / 1000;
 
+    const active = this.activeSessions();
     const prunedSessions: string[] = [];
     for (const [id, when] of sessions) {
-      if (id === keep.sessionId) continue;
+      if (id === keep.sessionId || active.has(id) || protection.pendingSessions.has(id)) continue;
       const tooOld = when < cutoff;
-      const tooMany = sessions.findIndex(([s]) => s === id) >= maxSessions;
+      // Count pressure never prunes a recently active session. Age remains the
+      // durable bound, while a missing parent is recoverable in ShadowRepo.
+      const tooMany = sessions.findIndex(([s]) => s === id) >= maxSessions && when < countCutoff;
       if (tooOld || tooMany) prunedSessions.push(id);
     }
-    for (const id of prunedSessions) await this.pruneSession(id);
+    for (const id of prunedSessions) {
+      // Validate before deleting private metadata; malformed state is retained.
+      readCheckpointState(this.storeDir, this.cwd, id);
+      removeCompletedRecovery(this.storeDir, this.cwd, id);
+      rmSync(checkpointStatePath(this.storeDir, id), { force: true });
+      await this.pruneSession(id);
+    }
 
     const loose = await root.looseObjectCount();
     const packed = prunedSessions.length > 0 || loose > 5000 || bytesBefore > maxBytes;

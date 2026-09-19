@@ -1,90 +1,144 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { packagePatches, oauthPackageDir, matchesPatch, applyPackagePatches, verifyPackagePatches, verifyOAuthCheckout } from "../scripts/package-patches.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const patchName = "pi-web-search-oauth-system.patch";
-const patchFile = join(root, "patches", patchName);
-const install = readFileSync(join(root, "install.sh"), "utf8");
-const doctor = readFileSync(join(root, "doctor.sh"), "utf8");
-const identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+const installed = process.env.PI_SETUP_PACKAGE_AGENT_DIR ?? join(homedir(), ".pi/agent");
+const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 
-// The upstream pi-web-search@1.3.1 request body the patch rewrites. `patch`
-// applies with offset tolerance, so this excerpt needs the hunk context only.
-const upstreamExcerpt = `    }
-
-    const maxTokens = Math.min(Math.max(1024, Math.floor(model.maxTokens / 3) || 4096), 8192);
-    const requestBody = {
-        model: model.id,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: prompt }],
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }],
-        stream: true,
-`;
-
-function stage() {
-  const dir = mkdtempSync(join(tmpdir(), "pi-setup-patch-"));
-  mkdirSync(join(dir, "src"), { recursive: true });
-  writeFileSync(join(dir, "src", "api.ts"), upstreamExcerpt);
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), "pi-all-patches-"));
+  mkdirSync(dirname(join(dir, oauthPackageDir)), { recursive: true });
+  // Local clone copies only public committed package code, never auth/runtime data.
+  execFileSync("git", ["clone", "--quiet", "--local", "--no-hardlinks", join(installed, oauthPackageDir), join(dir, oauthPackageDir)]);
+  for (const patch of packagePatches) {
+    for (const file of Object.keys(patch.targets)) {
+      const path = join(dir, patch.packageDir, file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, readFileSync(join(installed, patch.packageDir, file)));
+    }
+  }
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function runPatch(dir, extra = []) {
-  return spawnSync("patch", ["-p1", "-s", "--batch", "--forward", ...extra, "-d", dir], {
-    input: readFileSync(patchFile, "utf8"),
-    encoding: "utf8",
+function images(dir) {
+  return Object.fromEntries(packagePatches.flatMap(patch => Object.keys(patch.targets).map(file => {
+    const path = join(dir, patch.packageDir, file);
+    return [`${patch.packageDir}/${file}`, digest(readFileSync(path))];
+  })));
+}
+
+function reverse(dir, patch) {
+  execFileSync("patch", ["-p1", "-s", "--batch", "-R", "-d", join(dir, patch.packageDir)], {
+    input: readFileSync(join(root, "patches", patch.patch)),
   });
 }
 
-function shellConstant(script, name) {
-  const match = new RegExp(`^${name}="([^"]*)"$`, "m").exec(script);
-  assert.ok(match, `${name} is not pinned`);
-  return match[1];
-}
+test("manifest covers every patch and all changed targets with exact images", () => {
+  assert.deepEqual(packagePatches.map(p => p.patch).sort(), readdirSync(join(root, "patches")).filter(p => p.endsWith(".patch")).sort());
+  for (const patch of packagePatches) {
+    const text = readFileSync(join(root, "patches", patch.patch), "utf8");
+    const paths = [...text.matchAll(/^\+\+\+ b\/([^\t\r\n]+)/gm)].map(m => m[1]);
+    assert.ok(paths.length);
+    assert.deepEqual(paths.sort(), Object.keys(patch.targets).sort());
+    for (const hashes of Object.values(patch.targets)) {
+      if (hashes.before !== null) assert.match(hashes.before, /^[0-9a-f]{64}$/);
+      assert.match(hashes.after, /^[0-9a-f]{64}$/);
+    }
+  }
+});
 
-test("the package patch adds the Claude Code identity that OAuth web search requires", () => {
-  const f = stage();
+test("all four patches round-trip exact upstream bytes and reapply idempotently", () => {
+  const f = fixture();
   try {
-    const applied = runPatch(f.dir);
-    assert.equal(applied.status, 0, `patch failed:\n${applied.stderr}`);
-    const result = readFileSync(join(f.dir, "src", "api.ts"), "utf8");
-    assert.match(result, /\.\.\.\(isOAuth/, "the system block must stay OAuth-only");
-    assert.ok(result.includes(identity), "patched request body must carry the Claude Code identity");
-    assert.ok(result.includes("system:"), "patched request body must set a system field");
-  } finally {
-    f.cleanup();
-  }
+    verifyPackagePatches(f.dir);
+    verifyOAuthCheckout(f.dir);
+    for (const patch of packagePatches) {
+      reverse(f.dir, patch);
+      assert.equal(matchesPatch(f.dir, patch, "before"), true, patch.patch);
+    }
+    applyPackagePatches(f.dir);
+    verifyPackagePatches(f.dir);
+    verifyOAuthCheckout(f.dir);
+    const before = images(f.dir);
+    const times = Object.keys(before).map(file => statSync(join(f.dir, file)).mtimeMs);
+    applyPackagePatches(f.dir);
+    assert.deepEqual(images(f.dir), before);
+    assert.deepEqual(Object.keys(before).map(file => statSync(join(f.dir, file)).mtimeMs), times);
+  } finally { f.cleanup(); }
 });
 
-test("the package patch refuses to apply twice", () => {
-  const f = stage();
+test("partial OAuth and modified secondary theme targets are rejected without overwrite", () => {
+  const f = fixture();
   try {
-    assert.equal(runPatch(f.dir).status, 0);
-    assert.notEqual(runPatch(f.dir, ["--dry-run"]).status, 0, "an applied tree must refuse a second forward apply");
-  } finally {
-    f.cleanup();
-  }
+    const auth = join(f.dir, oauthPackageDir, "src/auth.ts");
+    const after = readFileSync(auth);
+    writeFileSync(auth, execFileSync("git", ["-C", join(f.dir, oauthPackageDir), "show", "HEAD:src/auth.ts"]));
+    let before = images(f.dir);
+    assert.throws(() => applyPackagePatches(f.dir), /Partial or foreign/);
+    assert.deepEqual(images(f.dir), before);
+    writeFileSync(auth, after);
+    const secondary = join(f.dir, "npm/node_modules/pi-background-tasks/src/extension.ts");
+    writeFileSync(secondary, readFileSync(secondary, "utf8") + "\n// unexpected change\n");
+    before = images(f.dir);
+    assert.throws(() => verifyPackagePatches(f.dir), /checksum mismatch/);
+    assert.throws(() => applyPackagePatches(f.dir), /Partial or foreign/);
+    assert.deepEqual(images(f.dir), before);
+  } finally { f.cleanup(); }
 });
 
-test("install and doctor pin the same patch, target, and post-image checksum", () => {
-  for (const name of ["WEB_SEARCH_PATCH", "WEB_SEARCH_PATCH_TARGET", "WEB_SEARCH_PATCHED_SHA256"]) {
-    assert.equal(shellConstant(install, name), shellConstant(doctor, name), `${name} differs between install.sh and doctor.sh`);
-  }
-  assert.equal(shellConstant(install, "WEB_SEARCH_PATCH"), patchName);
-  assert.equal(shellConstant(install, "WEB_SEARCH_PATCH_TARGET"), "src/api.ts");
-  assert.match(shellConstant(install, "WEB_SEARCH_PATCHED_SHA256"), /^[0-9a-f]{64}$/, "the post-image pin must be a sha256 digest");
+test("OAuth rejects unrelated tracked and untracked changes", () => {
+  const f = fixture();
+  try {
+    const path = join(f.dir, oauthPackageDir, "package.json");
+    const original = readFileSync(path);
+    writeFileSync(path, Buffer.concat([original, Buffer.from("\n")]));
+    assert.throws(() => verifyOAuthCheckout(f.dir), /outside the pinned patch/);
+    writeFileSync(path, original);
+    writeFileSync(join(f.dir, oauthPackageDir, "unrelated.txt"), "unrelated user work\n");
+    assert.throws(() => applyPackagePatches(f.dir), /outside the pinned patch/);
+  } finally { f.cleanup(); }
 });
 
-test("install applies every patch under patches/ and doctor verifies the result", () => {
-  assert.match(install, /apply_package_patch "\$WEB_SEARCH_PATCH"/, "install.sh must apply the patch");
-  assert.match(doctor, /shasum -a 256 "\$web_search_target"/, "doctor.sh must checksum the live patched source");
-  assert.match(doctor, /"\$WEB_SEARCH_PATCHED_SHA256"/, "doctor.sh must compare the pinned checksum");
-  for (const script of [install, doctor]) {
-    assert.match(script, /command -v patch/, "both scripts must require patch");
-    assert.match(script, /command -v shasum/, "both scripts must require shasum");
-  }
+test("patch application never follows a symlink target", () => {
+  const f = fixture();
+  try {
+    const path = join(f.dir, oauthPackageDir, "src/auth.ts");
+    const outside = join(f.dir, "unrelated.ts");
+    const bytes = readFileSync(path);
+    writeFileSync(outside, bytes);
+    rmSync(path);
+    symlinkSync(outside, path);
+    assert.throws(() => applyPackagePatches(f.dir), /Non-regular/);
+    assert.deepEqual(readFileSync(outside), bytes);
+  } finally { f.cleanup(); }
+});
+
+test("known web-search identity and theme-helper fixes remain covered", () => {
+  const api = readFileSync(join(installed, "npm/node_modules/pi-web-search/src/api.ts"), "utf8");
+  assert.match(api, /\.\.\.\(isOAuth/);
+  assert.ok(api.includes("You are Claude Code, Anthropic's official CLI for Claude."));
+  assert.ok(api.includes("system:"));
+  assert.ok(api.includes("web_search_20260318"));
+  const manager = readFileSync(join(installed, "npm/node_modules/pi-background-tasks/src/ui/background-tasks-manager.ts"), "utf8");
+  assert.doesNotMatch(manager, /\bblueBorder\b|\blightBlue\b/);
+});
+
+test("installer and doctor share complete patch verification", () => {
+  const install = readFileSync(join(root, "install.sh"), "utf8");
+  const doctor = readFileSync(join(root, "doctor.sh"), "utf8");
+  const health = readFileSync(join(root, "scripts/package-health.mjs"), "utf8");
+  assert.match(install, /package-patches\.mjs" "\$PATCH_ACTION"/);
+  assert.match(install, /PATCH_ACTION="--check"/);
+  assert.match(install, /PATCH_ACTION="--apply"/);
+  assert.match(doctor, /package-health\.mjs/);
+  assert.match(health, /verifyPackagePatches\(agentDir\)/);
+  assert.match(health, /verifyOAuthCheckout\(agentDir\)/);
+  assert.doesNotMatch(doctor, /checkout has tracked modifications/);
 });

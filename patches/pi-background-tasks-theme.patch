@@ -1,0 +1,129 @@
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -68,12 +68,8 @@
+ });
+ const PACKAGE_NAME = packageInfo.name ?? 'pi-background-tasks';
+ const PACKAGE_VERSION = packageInfo.version;
+-const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
+-const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
+-const ANSI_RESET = '\x1b[0m';
+-
+-function lightBlue(value: string): string {
+-  return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
++function taskBadge(theme: Theme, value: string): string {
++  return theme.bg('selectedBg', theme.fg('text', value));
+ }
+ 
+ function textContent(text: string) {
+@@ -294,7 +290,7 @@
+       if (running.length === 0 && unseenFinishedCount === 0) {
+         ctx.ui.setStatus(
+           'background-tasks',
+-          updateSegment ? lightBlue(` bg ${updateSegment} `) : undefined,
++          updateSegment ? taskBadge(ctx.ui.theme, ` bg ${updateSegment} `) : undefined,
+         );
+         return;
+       }
+@@ -310,7 +306,7 @@
+       const segments = [...parts, entryHint];
+       if (updateSegment) segments.push(updateSegment);
+       const label = ` bg ${segments.join(' · ')} `;
+-      ctx.ui.setStatus('background-tasks', lightBlue(label));
++      ctx.ui.setStatus('background-tasks', taskBadge(ctx.ui.theme, label));
+     } catch (error) {
+       console.error(
+         `[background-tasks] UI update failed: ${error instanceof Error ? error.message : String(error)}`,
+--- a/src/ui/background-tasks-manager.ts
++++ b/src/ui/background-tasks-manager.ts
+@@ -5,6 +5,7 @@
+   matchesKey,
+   truncateToWidth,
+   visibleWidth,
++  stripTerminalSequences,
+   type Component,
+   type TUI,
+ } from '@earendil-works/pi-tui';
+@@ -20,6 +21,7 @@
+ 
+ export interface TaskManagerTheme {
+   fg: Theme['fg'];
++  bg: Theme['bg'];
+ }
+ 
+ export type BackgroundTaskForUi = BgTaskSnapshot & { name: string; outputAbsPath: string };
+@@ -32,10 +34,6 @@
+ const DETAIL_TAIL_BYTES = 128 * 1024;
+ const LIST_VISIBLE_ROWS = 14;
+ const DETAIL_VISIBLE_OUTPUT_LINES = 12;
+-const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
+-const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
+-const LIGHT_BLUE_BORDER = '\x1b[38;2;83;160;215m';
+-const ANSI_RESET = '\x1b[0m';
+ 
+ function formatTime(timestamp: number): string {
+   return new Date(timestamp).toLocaleTimeString();
+@@ -67,14 +65,11 @@
+ 
+ function padAnsi(value: string, width: number): string {
+   return value + ' '.repeat(Math.max(0, width - visibleWidth(value)));
+-}
+-
+-function lightBlue(value: string): string {
+-  return `${LIGHT_BLUE_BG}${LIGHT_BLUE_FG}${value}${ANSI_RESET}`;
+ }
+ 
+-function blueBorder(value: string): string {
+-  return `${LIGHT_BLUE_BORDER}${value}${ANSI_RESET}`;
++export function highlightTaskRow(theme: TaskManagerTheme, value: string): string {
++  // Nested status colors must not override the selected foreground (e.g. yellow on pale blue).
++  return theme.bg('selectedBg', theme.fg('text', stripTerminalSequences(value)));
+ }
+ 
+ function statusLabel(status: BgTaskSnapshot['status']): string {
+@@ -575,14 +570,15 @@
+     width: number,
+   ): string[] {
+     const inner = Math.max(1, width - 2);
+-    const top = blueBorder(`╭${'─'.repeat(inner)}╮`);
+-    const bottom = blueBorder(`╰${'─'.repeat(inner)}╯`);
+-    const row = (content = '') =>
+-      `${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
+-    const header = lightBlue(padAnsi(` ${title}`, inner));
++    const border = (value: string) => this.theme.fg('border', value);
++    const top = border(`╭${'─'.repeat(inner)}╮`);
++    const bottom = border(`╰${'─'.repeat(inner)}╯`);
++    const row = (content = '') =>
++      `${border('│')}${padAnsi(truncateToWidth(content, inner), inner)}${border('│')}`;
++    const header = highlightTaskRow(this.theme, padAnsi(` ${title}`, inner));
+     const subtitleLine = subtitle
+-      ? lightBlue(padAnsi(` ${subtitle}`, inner))
+-      : lightBlue(' '.repeat(inner));
++      ? highlightTaskRow(this.theme, padAnsi(` ${subtitle}`, inner))
++      : highlightTaskRow(this.theme, ' '.repeat(inner));
+     const lines = [top, row(header), row(subtitleLine), row()];
+     for (const line of body) lines.push(row(line));
+     lines.push(row());
+@@ -665,7 +661,7 @@
+         const exit =
+           task.status !== 'running' ? this.theme.fg('dim', formatExitCodeText(task.exitCode)) : '';
+         let row = ` ${pointer} ${unreadMark} ${name} ${this.theme.fg('dim', task.id)} ${this.theme.fg('dim', '·')} ${status}${exit} ${this.theme.fg('dim', `${runtime} ${size}`)}${contextText}${modelText}${tokenText}${toolText}${activityText}`;
+-        if (selected) row = lightBlue(padAnsi(truncateToWidth(row, width - 4), width - 4));
++        if (selected) row = highlightTaskRow(this.theme, padAnsi(truncateToWidth(row, width - 4), width - 4));
+         body.push(row);
+       }
+       if (tasks.length > LIST_VISIBLE_ROWS) {
+@@ -739,10 +735,11 @@
+ 
+   private renderOutputBox(width: number): string[] {
+     const inner = Math.max(1, width - 2);
+-    const top = ` ${blueBorder(`╭${'─'.repeat(inner)}╮`)}`;
+-    const bottom = ` ${blueBorder(`╰${'─'.repeat(inner)}╯`)}`;
++    const border = (value: string) => this.theme.fg('border', value);
++    const top = ` ${border(`╭${'─'.repeat(inner)}╮`)}`;
++    const bottom = ` ${border(`╰${'─'.repeat(inner)}╯`)}`;
+     const row = (content = '') =>
+-      ` ${blueBorder('│')}${padAnsi(truncateToWidth(content, inner), inner)}${blueBorder('│')}`;
++      ` ${border('│')}${padAnsi(truncateToWidth(content, inner), inner)}${border('│')}`;
+     const lines = [top];
+     if (this.tailError) {
+       lines.push(row(this.theme.fg('error', this.tailError)));

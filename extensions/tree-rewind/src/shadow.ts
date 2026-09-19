@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HERMETIC_ENV, nulList, runGit, targetGitDir, targetTrackedFiles, text, type GitResult } from "./git.js";
 
@@ -12,6 +13,7 @@ import { HERMETIC_ENV, nulList, runGit, targetGitDir, targetTrackedFiles, text, 
  */
 const ATTR_GUARD = "* -text -diff -filter -crlf -working-tree-encoding -ident\n";
 const OBJECT_ID_RE = /^[0-9a-f]{40,64}$/;
+export const MAX_PROJECT_FILE_BYTES = 128 * 1024 * 1024;
 
 /**
  * Fallback ignores for a project that governs none of its own.
@@ -51,10 +53,14 @@ const CONFIG: [string, string][] = [
   ["core.compression", "0"], // ~25% faster cold snapshot, ~50% more disk
   ["core.looseCompression", "0"],
   ["core.fsync", "none"],
-  ["core.untrackedCache", "true"],
+  // Git's untracked cache follows filesystem case folding and can hide the
+  // old spelling during a case-only rename when the shadow index is strict.
+  ["core.untrackedCache", "false"],
   ["core.autocrlf", "false"],
   ["core.safecrlf", "false"],
   ["core.symlinks", "true"],
+  // The shadow index must record case-only renames even when the worktree is APFS.
+  ["core.ignorecase", "false"],
   ["core.bigFileThreshold", "8m"],
   ["index.version", "4"],
   ["gc.auto", "0"],
@@ -81,10 +87,10 @@ export class ShadowError extends Error {
 const BENIGN_ADD_RE =
   /^(warning:|hint:|error: open\(|error: unable to index file|error: unable to stat|error: '[^']*' does not have a commit checked out|fatal: adding files failed|fatal: pathspec '[^']*' did not match)/;
 
-function checkAdd(r: GitResult, op: string): void {
-  if (r.code === 0) return;
+function checkAdd(r: GitResult, op: string): boolean {
+  if (r.code === 0) return r.stderr.trim() === "";
   const lines = r.stderr.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length && lines.every((l) => BENIGN_ADD_RE.test(l))) return;
+  if (lines.length && lines.every((l) => BENIGN_ADD_RE.test(l))) return false;
   throw new ShadowError(op, r.stderr);
 }
 
@@ -108,14 +114,18 @@ export class ShadowRepo {
    *  empty whenever the project governs its own ignores */
   defaultExcludes: string[] = [];
   private readonly env: NodeJS.ProcessEnv;
-  private readonly forced = new Set<string>();
+  private readonly signal: AbortSignal | undefined;
+  private recoveredMissingParent = false;
   private lastSeedMtime = -1;
+  /** Raw backend snapshots may tolerate partial add; guarded checkpoints may not. */
+  captureIncomplete = false;
   /** the target's real index file (resolved through gitdir files), cached at init */
   private targetIndex: string | null = null;
 
   // No parameter properties: pi's extension loader and Node's native type
   // stripping are both strip-only and reject them.
-  constructor(worktree: string, storeDir: string, key: string) {
+  constructor(worktree: string, storeDir: string, key: string, signal?: AbortSignal) {
+    this.signal = signal;
     this.worktree = worktree;
     this.gitDir = join(storeDir, `${key}.git`);
     this.indexFile = join(storeDir, `${key}.index`);
@@ -129,7 +139,7 @@ export class ShadowRepo {
   }
 
   private run(args: string[], input?: string | Buffer): Promise<GitResult> {
-    return runGit(args, this.env, input == null ? {} : { input });
+    return runGit(args, this.env, { input, signal: this.signal });
   }
 
   /** Idempotent: safe to call on an existing store, which is the fast path on
@@ -138,7 +148,7 @@ export class ShadowRepo {
     mkdirSync(this.gitDir, { recursive: true });
     // `git init` refuses to run while GIT_WORK_TREE is set.
     const initEnv: NodeJS.ProcessEnv = { ...process.env, ...HERMETIC_ENV };
-    await runGit(["init", "-q", "--bare", this.gitDir], initEnv);
+    await runGit(["init", "-q", "--bare", this.gitDir], initEnv, { signal: this.signal });
     for (const [k, v] of CONFIG) await this.run(["config", k, v]);
     mkdirSync(join(this.gitDir, "info"), { recursive: true });
 
@@ -162,7 +172,7 @@ export class ShadowRepo {
     }
     writeFileSync(attrFile, ATTR_GUARD);
 
-    const dir = await targetGitDir(this.worktree);
+    const dir = await targetGitDir(this.worktree, this.signal);
     this.targetIndex = dir ? join(dir, "index") : null;
 
     // The target's repo-local excludes are invisible to the shadow (GIT_DIR
@@ -191,6 +201,23 @@ export class ShadowRepo {
     writeFileSync(join(this.gitDir, "info", "exclude"), exclude);
   }
 
+  private async assertCandidateSizes(forceTrack: Iterable<string>): Promise<void> {
+    const changed = await this.run(["ls-files", "-z", "--modified", "--others", "--exclude-standard"]);
+    if (changed.code !== 0) throw new ShadowError("size preflight", changed.stderr);
+    const candidates = new Set([...nulList(changed), ...forceTrack]);
+    for (const path of candidates) {
+      try {
+        const stat = statSync(join(this.worktree, path));
+        if (stat.isFile() && stat.size > MAX_PROJECT_FILE_BYTES) {
+          throw new ShadowError("size preflight", `${path} exceeds ${MAX_PROJECT_FILE_BYTES} bytes`);
+        }
+      } catch (error) {
+        if (error instanceof ShadowError) throw error;
+        // Missing or unreadable paths are handled by add --ignore-errors below.
+      }
+    }
+  }
+
   /**
    * .gitignore semantics are relative to the existing index: git never ignores
    * a file it already tracks. A fresh shadow index tracks nothing, so ignore
@@ -199,27 +226,37 @@ export class ShadowRepo {
    * pathspec, same result.
    */
   async stage(forceTrack: Iterable<string> = [], opts: { reseed?: boolean } = {}): Promise<void> {
+    const forced = [...forceTrack];
+    this.captureIncomplete = false;
+    await this.assertCandidateSizes(forced);
     const add = await this.run(["add", "-A", "--ignore-errors"]);
-    checkAdd(add, "add");
+    this.captureIncomplete = !checkAdd(add, "add");
 
     // Re-deriving the upstream tracked set costs ~0.3s on a 95k-file repo, so
     // only redo it when the target's own index has actually moved (a commit,
     // checkout or stage by the user) rather than on every checkpoint.
     const mtime = this.targetIndexMtime();
-    const forced = [...forceTrack];
-    const newlyForced = forced.filter((p) => !this.forced.has(p));
     const reseed = opts.reseed || mtime !== this.lastSeedMtime;
 
-    if (!reseed && !newlyForced.length) return;
+    // A forced path may have been absent at the previous checkpoint, or deleted
+    // and recreated since then. Its first appearance must still be staged.
+    if (!reseed && !forced.length) return;
 
-    const upstream = reseed ? await targetTrackedFiles(this.worktree) : null;
+    const upstream = reseed ? await targetTrackedFiles(this.worktree, this.signal) : null;
     const have = new Set(nulList(await this.run(["ls-files", "-z"])));
     const missing = [
       ...(upstream ?? []).filter((p) => !have.has(p)),
       ...forced.filter((p) => !have.has(p)),
-    ];
+    ].filter((path) => {
+      try {
+        const st = lstatSync(join(this.worktree, path));
+        return st.isFile() || st.isSymbolicLink();
+      } catch (error) {
+        if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) this.captureIncomplete = true;
+        return false;
+      }
+    });
     if (missing.length) await this.addForced(missing);
-    for (const p of forced) this.forced.add(p);
     this.lastSeedMtime = mtime;
   }
 
@@ -244,13 +281,14 @@ export class ShadowRepo {
     const listFile = join(this.gitDir, "seed.paths");
     writeFileSync(listFile, paths.join("\0"));
     const r = await this.run([
+      "--literal-pathspecs",
       "add",
       "-f",
       "--ignore-errors",
       `--pathspec-from-file=${listFile}`,
       "--pathspec-file-nul",
     ]);
-    checkAdd(r, "add -f");
+    if (!checkAdd(r, "add -f")) this.captureIncomplete = true;
   }
 
   /** Stage the worktree and record it as a commit whose parents mirror the
@@ -261,13 +299,74 @@ export class ShadowRepo {
     const tree = text(wt).trim();
     if (wt.code !== 0 || !tree) throw new ShadowError("write-tree", wt.stderr);
 
-    const args = ["-c", "user.name=pi-rewind", "-c", "user.email=rewind@pi.local", "commit-tree", tree];
-    for (const p of parents) if (p) args.push("-p", p);
-    args.push("-m", message);
-    const r = await this.run(args);
+    const commitArgs = (withParents: boolean) => {
+      const args = ["-c", "user.name=pi-rewind", "-c", "user.email=rewind@pi.local", "commit-tree", tree];
+      if (withParents) for (const p of parents) if (p) args.push("-p", p);
+      args.push("-m", message);
+      return args;
+    };
+    let r = await this.run(commitArgs(true));
+    // Maintenance from another process may have pruned an old session parent.
+    // Recover as a new root instead of poisoning every future checkpoint.
+    if (r.code !== 0 && parents.length > 0 && /not a valid object name|bad object|invalid object/i.test(r.stderr)) {
+      r = await this.run(commitArgs(false));
+      if (r.code === 0) this.recoveredMissingParent = true;
+    }
     const sha = text(r).trim();
     if (r.code !== 0 || !sha) throw new ShadowError("commit-tree", r.stderr);
     return sha;
+  }
+
+  consumeMissingParentRecovery(): boolean {
+    const recovered = this.recoveredMissingParent;
+    this.recoveredMissingParent = false;
+    return recovered;
+  }
+
+  /** Names only: preserve unknown coverage without copying ignored contents.
+   * Git evaluates root/nested .gitignore, info/exclude and seeded defaults. */
+  async ignoredPaths(): Promise<string[]> {
+    const result = await this.run(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]);
+    if (result.code !== 0) throw new ShadowError("ignored coverage", result.stderr);
+    return nulList(result);
+  }
+
+  /** Add ONLY a first-touch preimage to an existing checkpoint. Restaging the
+   * entire worktree here would fold earlier tool changes into its before-state. */
+  async backfillFile(commit: string, path: string, unknown = true): Promise<{ commit: string; absent: boolean }> {
+    if (!OBJECT_ID_RE.test(commit)) throw new ShadowError("preimage", "invalid checkpoint");
+    if (await this.entryAt(commit, path)) return { commit, absent: false };
+    // A covered pre-prompt absence cannot become mid-prompt contents just
+    // because bash created a file before the first named edit.
+    if (!unknown) return { commit, absent: true };
+    let st;
+    try { st = lstatSync(join(this.worktree, path)); }
+    catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+    if (st && ((!st.isFile() && !st.isSymbolicLink()) || st.size > MAX_PROJECT_FILE_BYTES)) {
+      throw new ShadowError("preimage", "not a bounded regular file or symlink");
+    }
+    if (!st) return { commit, absent: true };
+    const index = join(this.gitDir, `preimage-${randomUUID()}.index`);
+    const env = { ...this.env, GIT_INDEX_FILE: index };
+    const run = async (args: string[]) => {
+      const result = await runGit(args, env, { cwd: this.worktree, signal: this.signal });
+      if (result.code !== 0) throw new ShadowError("preimage", result.stderr);
+      return text(result).trim();
+    };
+    try {
+      await run(["read-tree", commit]);
+      await run(["--literal-pathspecs", "add", "-f", "--", path]);
+      const tree = await run(["write-tree"]);
+      const patched = await run(["-c", "user.name=pi-rewind", "-c", "user.email=rewind@pi.local",
+        "commit-tree", tree, "-p", commit, "-m", "first-touch preimage"]);
+      if (!await this.entryAt(patched, path)) throw new ShadowError("preimage", "file disappeared during capture");
+      return { commit: patched, absent: false };
+    } finally {
+      rmSync(index, { force: true });
+      rmSync(`${index}.lock`, { force: true });
+    }
   }
 
   /** Loose objects accumulate because gc.auto is 0; this is the signal for
@@ -327,6 +426,14 @@ export class ShadowRepo {
     return r.code === 0 ? r.stdout : null;
   }
 
+  /** Size without content, so a caller can refuse to materialise a large blob. */
+  async blobSize(sha: string): Promise<number | null> {
+    if (!OBJECT_ID_RE.test(sha)) return null;
+    const r = await this.run(["cat-file", "-s", sha]);
+    const n = Number(text(r).trim());
+    return r.code === 0 && Number.isFinite(n) ? n : null;
+  }
+
   /** Point the index at `commit`, then materialise only `paths`. This is the
    *  bulk writer: it restores symlinks (including dangling ones) and file modes
    *  correctly, and it does not write through a symlink. */
@@ -340,13 +447,14 @@ export class ShadowRepo {
     const tmpIndex = join(this.gitDir, `restore-${process.pid}-${Date.now()}.index`);
     const env = { ...this.env, GIT_INDEX_FILE: tmpIndex };
     try {
-      const read = await runGit(["read-tree", commit], env);
+      const read = await runGit(["read-tree", commit], env, { signal: this.signal });
       if (read.code !== 0) return { ok: 0, failed: paths };
 
       // checkout-index takes its path list on stdin only; it has no
       // --pathspec-from-file.
       const r = await runGit(["checkout-index", "-f", "-z", "--stdin"], env, {
         input: paths.join("\0") + "\0",
+        signal: this.signal,
       });
       return r.code === 0 ? { ok: paths.length, failed: [] } : { ok: 0, failed: paths };
     } finally {
@@ -368,6 +476,25 @@ export class ShadowRepo {
 
   async trackedPaths(): Promise<string[]> {
     return nulList(await this.run(["ls-files", "-z"]));
+  }
+
+  async pathsAt(commit: string): Promise<string[]> {
+    if (!OBJECT_ID_RE.test(commit)) return [];
+    return nulList(await this.run(["ls-tree", "-r", "--name-only", "-z", commit]));
+  }
+
+  async entryAt(commit: string, path: string): Promise<{ mode: string; sha: string } | null> {
+    if (!OBJECT_ID_RE.test(commit)) return null;
+    const result = await this.run(["--literal-pathspecs", "ls-tree", "-z", commit, "--", path]);
+    if (result.code !== 0) return null;
+    const record = text(result).split("\0").find(Boolean);
+    const match = record ? /^(\d+)\s+\w+\s+([0-9a-f]+)\t/.exec(record) : null;
+    return match ? { mode: match[1], sha: match[2] } : null;
+  }
+
+  async refValue(ref: string): Promise<string | null> {
+    const result = await this.run(["show-ref", "--hash", "--verify", ref]);
+    return result.code === 0 ? text(result).trim() : null;
   }
 
   async setRef(ref: string, commit: string): Promise<void> {

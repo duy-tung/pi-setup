@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "openai": {
+      "modelOverrides": {
+        "gpt-6-astra": {
+          "contextWindow": 1050000
+        }
+      }
+    },
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-6-astra": {
+          "contextWindow": 1050000
+        }
+      }
+    }
+  }
+}

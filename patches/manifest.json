@@ -1,0 +1,70 @@
+[
+  {
+    "patch": "pi-anthropic-oauth-compat.patch",
+    "packageDir": "git/github.com/duy-tung/pi-anthropic-oauth-plus",
+    "targets": {
+      "README.md": {
+        "before": "715af878f1c68fea5ee3bbe665b50707cb729bb8e4231267cb91175f3269c930",
+        "after": "27398c20b00b864ffd0864fb2f040fea97b3d6d0e2fe4010461b2e87ea545790"
+      },
+      "src/auth.ts": {
+        "before": "7e76e899ef4e9293912b5056e2145d131a133b6b6d3600ec4fdf188a11768318",
+        "after": "5d5c1ed1d0c314d9128b842c36e0c1df7b73a64f77c4abb05656e7a77e8e9836"
+      },
+      "src/convert.ts": {
+        "before": "7eebee00e15caf8767e236d630a49adb59acbe4fca5f00dc29a12832b684fe7b",
+        "after": "48cb5c5f5b14c7839c647551cd2ac2efeda71687f8966179aa693de7fd6c2eb4"
+      },
+      "src/index.ts": {
+        "before": "0b98c0019d43a854e18aba3f3b68455f9d2977c4c3c5467a28ca56fcd8715dc5",
+        "after": "00057b9574943af3ecf8434eaed797c664d1986dd1500d1571b7228ce71dc98a"
+      },
+      "src/stream.ts": {
+        "before": "151731efb28e60893d4286db5f4d4dd9af963d73f9abc62f214e5cf0d7d25385",
+        "after": "c0ad00b723b336cfa95bfd4b6c582354b9e3282aa3781dd08af7c7a5778c3eb7"
+      },
+      "test/cache-policy.test.mjs": {
+        "before": "5a693a4da94365aa28eebade43a3e6a07f30c85a11f7414f5c56537cc527e6d6",
+        "after": "bd0d662306fd543904a51b9db3282f983fcf8fb86315475a93769c33d8242d53"
+      },
+      "test/thinking.test.mjs": {
+        "before": null,
+        "after": "8c6c8157647fc5beec9683717e9f2837126f0ee44f3fb8680f92667e3d0acf15"
+      }
+    }
+  },
+  {
+    "patch": "pi-web-search-oauth-system.patch",
+    "packageDir": "npm/node_modules/pi-web-search",
+    "targets": {
+      "src/api.ts": {
+        "before": "4d6a845c226a44bab200991976f98f3b9e9a5cf09bfd49e0943918d8fc9e7324",
+        "after": "79d89c26e84ebcdcb351c277575335c9fc22277a677fe3887937ddffc1898ca1"
+      }
+    }
+  },
+  {
+    "patch": "pi-subagents-activity.patch",
+    "packageDir": "npm/node_modules/@tintinweb/pi-subagents",
+    "targets": {
+      "src/index.ts": {
+        "before": "622d44b11e615ec0509f13e858dcad4a40789e4613c03583930327f15d9ec6a9",
+        "after": "41aacef85e5b4c57b23e97b1c3c65e2cdb079223475571d0ae038f621fd1c7c8"
+      }
+    }
+  },
+  {
+    "patch": "pi-background-tasks-theme.patch",
+    "packageDir": "npm/node_modules/pi-background-tasks",
+    "targets": {
+      "src/extension.ts": {
+        "before": "9b0973b12fdbcd7c69d710059efaf2cfc32a1455ea7b8b1606255c876e602b6d",
+        "after": "e633f0dae002dd5a48846c3ac7362bf6722e36e6aa000511857811c07b8fe90b"
+      },
+      "src/ui/background-tasks-manager.ts": {
+        "before": "96c71807767499887ab3417e5eabac973a19221e4f2e985e2218d4ad672dd687",
+        "after": "bc11fb6f510224d1b3b457cdb1e025cd9d8b45ed7c0778cea7b6d03a6b525f5a"
+      }
+    }
+  }
+]

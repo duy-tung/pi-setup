@@ -1,4 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { PrivateWriteError } from "./storage.js";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RewindState } from "./state.js";
@@ -6,7 +8,9 @@ import {
   CUSTOM_TYPE,
   OUTSIDE,
   type ApplyResult,
+  type OperationSnapshot,
   type PlanItem,
+  type PersistedIndex,
   type PromptCheckpoint,
   type RestorePlan,
   type WorkspaceSnapshot,
@@ -15,14 +19,70 @@ import { Workspace, storeDirFor } from "./workspace.js";
 import { checkEligible, resolveExisting } from "./eligibility.js";
 import { OutsideStore } from "./outside.js";
 import { withLock } from "./lock.js";
+import { runBackend } from "./backend-lifetime.js";
+import { readCheckpointState, saveCheckpointState, validCheckpoint, validProjectPath } from "./checkpoint-store.js";
+import { assertRecoveryPreview, assertRecoveryReady, beginRestoreTransaction, finishRecoveryNoop, finishRestoreTransaction, loadRecoveryState, assertUndoTargetsAvailable, hasRequiredUndoItems, RestorePreflightError, type RestoreTransaction } from "./transactions.js";
 
 /** Store paths relative to the project root; anything outside stays absolute
  *  and will simply never match a repo, so it is never touched. */
 export function toRelPath(cwd: string, inputPath: string): string {
-  const abs = isAbsolute(inputPath) ? inputPath : join(cwd, inputPath);
-  const rel = relative(cwd, abs);
+  const raw = isAbsolute(inputPath) ? inputPath : join(cwd, inputPath);
+  const abs = resolveExisting(raw);
+  const rel = relative(resolveExisting(cwd), abs);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return abs.split(sep).join("/");
   return rel.split(sep).join("/");
+}
+
+function projectMode(state: RewindState, rel: string): number | undefined {
+  if (!validProjectPath(rel) || resolveExisting(join(state.cwd, rel)) !== join(resolveExisting(state.cwd), rel)) return undefined;
+  try {
+    const stat = lstatSync(join(state.cwd, rel));
+    return stat.isFile() ? stat.mode & 0o777 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function snapshotProjectModes(state: RewindState, paths: Iterable<string> = state.forceTrack): Record<string, number> {
+  const modes: Record<string, number> = {};
+  // Target-absent files still need their current private modes in the Undo.
+  for (const rel of new Set([...state.forceTrack, ...paths])) {
+    const mode = projectMode(state, rel);
+    if (mode !== undefined) modes[rel] = mode;
+  }
+  return modes;
+}
+
+export function projectModeMapChangeCount(state: RewindState, modes: Record<string, number> | undefined): number {
+  let count = 0;
+  for (const [rel, mode] of Object.entries(modes ?? {})) {
+    const current = projectMode(state, rel);
+    if (current !== undefined && current !== mode) count += 1;
+  }
+  return count;
+}
+
+export function projectModeChangeCount(state: RewindState, cp: PromptCheckpoint): number {
+  return projectModeMapChangeCount(state, cp.projectModes);
+}
+
+/** Restore non-Git permission bits only after content restoration succeeded. */
+export function restoreProjectModeMap(state: RewindState, modes: Record<string, number> | undefined, result: ApplyResult): void {
+  if (result.errors.length > 0) return;
+  for (const [rel, mode] of Object.entries(modes ?? {})) {
+    if (result.skipped.some(item => item.display === rel || rel.startsWith(`${item.display}/`))) continue;
+    const current = projectMode(state, rel);
+    if (current === undefined || current === mode) continue;
+    try {
+      chmodSync(join(state.cwd, rel), mode);
+    } catch (error) {
+      result.errors.push(`chmod ${rel}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+export function restoreProjectModes(state: RewindState, cp: PromptCheckpoint, result: ApplyResult): void {
+  restoreProjectModeMap(state, cp.projectModes, result);
 }
 
 /**
@@ -34,19 +94,92 @@ export function toRelPath(cwd: string, inputPath: string): string {
  * `/reload` drops out of every checkpoint taken after it.
  */
 function adoptTracked(state: RewindState): void {
+  for (const cp of state.checkpoints.values()) {
+    for (const path of [...Object.keys(cp.projectModes ?? {}), ...(cp.projectAbsent ?? []), ...(cp.projectTouched ?? [])]) {
+      if (validProjectPath(path)) state.forceTrack.add(path);
+    }
+  }
   if (!state.outside) return;
   const paths = new Set<string>();
   for (const cp of state.checkpoints.values()) {
     cp.outside = state.outside.sanitizeSnapshot(cp.outside);
+    if (cp.after) cp.after.outside = state.outside.sanitizeSnapshot(cp.after.outside);
     for (const p of Object.keys(cp.outside ?? {})) paths.add(p);
   }
   if (paths.size) state.outside.adopt(paths);
 }
 
+/** Caller holds the shared store lock. Local metadata creates no Pi tree nodes. */
+export function persistLocalIndex(state: RewindState): void {
+  const store = state.outside;
+  if (!store || !state.sessionId) return;
+  state.checkpointRevision = saveCheckpointState(store.storeDir, store.cwd, state.sessionId, state.checkpoints.values(), state.checkpointRevision, state.indexRevision);
+}
+
+/** Awaited by tool_call, before a named write can lose its original contents. */
+export async function captureProjectPreimage(state: RewindState, rel: string): Promise<void> {
+  if (!validProjectPath(rel)) throw new Error("invalid project tool path");
+  if (state.forceTrack.has(rel)) return;
+  const gen = state.gen;
+  const ws = await waitReady(state, READY_BUDGET_MS);
+  if (gen !== state.gen) throw new Error("session changed during preimage capture");
+  const cp = state.currentEntryId ? state.checkpoints.get(state.currentEntryId) : undefined;
+  if (!ws || !cp) {
+    // An already-declared cold-prime gap is not a checkpoint to backfill.
+    state.forceTrack.add(rel);
+    return;
+  }
+  const original = { snapshot: cp.snapshot, absent: cp.projectAbsent, touched: cp.projectTouched, modes: cp.projectModes };
+  await ws.backfillFile(cp.snapshot, rel,
+    state.sessionId ? { sessionId: state.sessionId, entryId: cp.entryId } : undefined,
+    (snapshot, absent) => {
+      if (gen !== state.gen) throw new Error("session changed during preimage capture");
+      cp.snapshot = snapshot;
+      cp.projectTouched = [...new Set([...(cp.projectTouched ?? []), rel])];
+      if (absent) cp.projectAbsent = [...new Set([...(cp.projectAbsent ?? []), rel])];
+      const mode = projectMode(state, rel);
+      if (!absent && mode !== undefined && cp.projectModes?.[rel] === undefined) cp.projectModes = { ...cp.projectModes, [rel]: mode };
+      try { persistLocalIndex(state); }
+      catch (error) {
+        cp.snapshot = original.snapshot;
+        cp.projectAbsent = original.absent;
+        cp.projectTouched = original.touched;
+        cp.projectModes = original.modes;
+        throw error;
+      }
+      if (state.head === original.snapshot) state.head = snapshot;
+      state.forceTrack.add(rel);
+      state.dirty = true;
+    }, !cp.projectAbsent?.includes(rel) && isUnknownPath(cp.projectUnknown, rel));
+}
+
+function isUnknownPath(unknown: string[] | undefined, display: string): boolean {
+  return (unknown ?? [""]).some(path => path === "" || path === display ||
+    (path.endsWith("/") && (display === path.slice(0, -1) || display.startsWith(path))));
+}
+
+/** Target absence is only actionable when the checkpoint actually covered it. */
+function protectUnknown(plan: RestorePlan, unknown: string[] | undefined, absent: string[] | undefined): RestorePlan {
+  if (!unknown) return plan; // Raw Workspace plans retain their documented backend contract.
+  const knownAbsent = new Set(absent ?? []);
+  return {
+    ...plan,
+    projectUnknownTo: unknown,
+    projectAbsentTo: absent,
+    items: plan.items.map(item => {
+      if (item.repo === OUTSIDE || item.targetSha || knownAbsent.has(item.display)) return item;
+      if (item.action !== "delete" && item.action !== "type-change") return item;
+      const uncovered = isUnknownPath(unknown, item.display);
+      return uncovered ? { ...item, action: "unprotected" as const, reason: "original contents were not captured; absence is unknown" } : item;
+    }),
+  };
+}
+
 /** Opens the workspace and kicks the cold snapshot off in the background: it
  *  is 1.6s on a small repo and ~48s on the linux kernel, and the user is
  *  typing their first prompt while it runs. */
-export function beginWorkspace(state: RewindState, cwd: string): void {
+export function beginWorkspace(state: RewindState, cwd: string, openWorkspace: typeof Workspace.open = Workspace.open): void {
+  if (state.lifetime.closed) return;
   state.cwd = cwd;
 
   // Decided before anything touches disk. `Workspace.open` already creates the
@@ -54,6 +187,25 @@ export function beginWorkspace(state: RewindState, cwd: string): void {
   // droppings in ~/.pi/agent/rewind for every directory pi was ever started in.
   const gate = checkEligible(cwd);
   const real = resolveExisting(cwd);
+  if (state.sessionId) {
+    try {
+      const local = readCheckpointState(storeDirFor(real), real, state.sessionId);
+      state.checkpointRevision = local.revision;
+      for (const cp of local.checkpoints) {
+        // At equal revisions the later JSONL flush may include outside touches.
+        // A genuinely newer private revision covers crashes before turn_end.
+        // Freshness is per object: after an incomplete public replay, an object
+        // from an old base is repaired while one from a newer surviving batch stays.
+        const published = state.indexObjectRevision.get(cp.entryId);
+        if (published === undefined || local.revision > published || !state.checkpoints.has(cp.entryId)) state.checkpoints.set(cp.entryId, cp);
+        else if (cp.after) state.checkpoints.get(cp.entryId)!.after = cp.after;
+      }
+    } catch (error) {
+      state.readyError = `private checkpoint state unavailable: ${(error as Error).message}`;
+      state.ready = Promise.resolve();
+      return;
+    }
+  }
 
   if (!gate.ok) {
     state.disabled = gate.reason;
@@ -65,6 +217,7 @@ export function beginWorkspace(state: RewindState, cwd: string): void {
     // into Library or .ssh.
     state.outside = new OutsideStore(real, storeDirFor(real), { projectless: true });
     adoptTracked(state);
+    loadRecoveryState(state);
     state.ready = Promise.resolve();
     return;
   }
@@ -75,23 +228,35 @@ export function beginWorkspace(state: RewindState, cwd: string): void {
   // one project has one place on disk.
   state.outside = new OutsideStore(real, storeDirFor(real));
   adoptTracked(state);
+  loadRecoveryState(state);
 
   // Generation guard: this closure keeps running after a /new session resets
   // the same state object. A 42s prime from the old session must not clobber
   // the new session's workspace (or its readyError) when it finally lands.
   const gen = state.gen;
-  state.ready = (async () => {
+  const sessionId = state.sessionId;
+  const lifetime = state.lifetime;
+  const primeAbort = new AbortController();
+  state.primeAbort = primeAbort;
+  state.ready = runBackend(lifetime, async () => {
     try {
-      const ws = await Workspace.open(cwd);
-      if (gen !== state.gen) return;
-      state.ws = ws;
+      const ws = await openWorkspace(cwd, { lifetime, signal: primeAbort.signal });
+      if (gen !== state.gen || lifetime.closed) return;
       await ws.prime();
+      if (gen !== state.gen || lifetime.closed) return;
+      await ws.withStoreLock(() => {
+        if (gen !== state.gen || lifetime.closed) return;
+        if (sessionId) ws.markSessionActive(sessionId);
+        state.ws = ws; // Publish lease + workspace atomically under the lock.
+      });
     } catch (err) {
-      if (gen !== state.gen) return;
+      if (gen !== state.gen || lifetime.closed) return;
       state.readyError = err instanceof Error ? err.message : String(err);
       state.ws = null;
+    } finally {
+      if (state.primeAbort === primeAbort) state.primeAbort = null;
     }
-  })();
+  });
 }
 
 /**
@@ -100,10 +265,14 @@ export function beginWorkspace(state: RewindState, cwd: string): void {
  * path pass a budget; the rewind UI passes none and waits.
  */
 export async function waitReady(state: RewindState, budgetMs?: number): Promise<Workspace | null> {
-  if (!state.ready) return state.ws;
+  const gen = state.gen;
+  const ready = state.ready;
+  const current = () => state.gen === gen && state.ready === ready && !state.lifetime?.closed;
+  if (!current()) return null;
+  if (!ready) return state.ws;
   if (budgetMs == null) {
-    await state.ready;
-    return state.ws;
+    await ready;
+    return current() ? state.ws : null;
   }
   let timer: NodeJS.Timeout | undefined;
   // Deliberately not unref'd: an unref'd timer lets the process exit before the
@@ -111,9 +280,9 @@ export async function waitReady(state: RewindState, budgetMs?: number): Promise<
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), budgetMs);
   });
-  const outcome = await Promise.race([state.ready.then(() => "ready" as const), timeout]);
+  const outcome = await Promise.race([ready.then(() => "ready" as const), timeout]);
   clearTimeout(timer);
-  return outcome === "ready" ? state.ws : null;
+  return outcome === "ready" && current() ? state.ws : null;
 }
 
 /** How long a prompt may wait for the cold snapshot before we give up and say
@@ -139,6 +308,7 @@ export async function ensureCheckpoint(
 ): Promise<PromptCheckpoint | null> {
   const existing = state.checkpoints.get(entryId);
   if (existing) return existing;
+  const gen = state.gen;
 
   // Off by policy is not a gap: the status line already says so permanently, and
   // warning about it once per prompt would train the user to ignore the warning
@@ -153,46 +323,50 @@ export async function ensureCheckpoint(
     return null;
   }
 
-  let snapshot;
+  if (gen !== state.gen) return null;
+  let checkpoint: PromptCheckpoint | null = null;
+  let phase = "checkpoint";
+  const validate = () => { if (gen !== state.gen) throw new Error("Session changed during checkpoint capture"); };
   try {
-    // The ref is written by snapshot() inside the store lock: a commit that
-    // sat unreferenced even briefly could be pruned by another session's
-    // shutdown maintenance.
-    snapshot = await ws.snapshot(state.head, `checkpoint ${entryId}`, state.forceTrack, {
+    // One transaction: closing must not cancel a second metadata acquisition
+    // after an accepted snapshot has already published its protected Git ref.
+    await ws.snapshotWithCoverage(state.head, `checkpoint ${entryId}`, state.forceTrack, {
       lockTimeoutMs: SNAPSHOT_LOCK_BUDGET_MS,
       ref: state.sessionId ? { sessionId: state.sessionId, entryId } : undefined,
+      validate,
+      publish: captured => {
+        validate();
+        phase = "checkpoint metadata";
+        const cp: PromptCheckpoint = {
+          entryId, parentEntryId: state.currentEntryId, prompt: prompt.slice(0, 200), timestamp,
+          snapshot: captured.snapshot, outside: state.outside?.snapshotTracked() ?? {},
+          projectModes: snapshotProjectModes(state), projectUnknown: captured.unknown,
+          projectAbsent: captured.absent, projectTouched: [...state.forceTrack],
+        };
+        state.checkpoints.set(entryId, cp);
+        try { persistLocalIndex(state); }
+        catch (error) { state.checkpoints.delete(entryId); throw error; }
+        state.head = cp.snapshot;
+        state.dirty = true;
+        state.lastGap = captured.unknown.includes("") ? "ignored coverage incomplete; ambiguous deletions will be skipped" : null;
+        checkpoint = cp;
+      },
     });
-  } catch (err) {
-    // A failed snapshot must not be recorded: a checkpoint that contains
-    // nothing still looks restorable and silently does nothing.
-    state.lastGap = `checkpoint failed: ${err instanceof Error ? err.message : String(err)}`;
-    return null;
-  }
-
-  let outside: PromptCheckpoint["outside"] = {};
-  try {
-    outside = await ws.withStoreLock(
-      () => state.outside?.snapshotTracked() ?? {},
-      SNAPSHOT_LOCK_BUDGET_MS,
-    );
+    return checkpoint;
   } catch (error) {
-    state.lastGap = `outside checkpoint failed: ${error instanceof Error ? error.message : String(error)}`;
+    if (gen === state.gen) state.lastGap = `${phase} failed: ${error instanceof Error ? error.message : String(error)}`;
     return null;
   }
+}
 
-  const cp: PromptCheckpoint = {
-    entryId,
-    parentEntryId: state.currentEntryId,
-    prompt: prompt.slice(0, 200),
-    timestamp,
-    snapshot,
-    outside,
-  };
-  state.checkpoints.set(entryId, cp);
-  state.head = snapshot;
-  state.dirty = true;
-  state.lastGap = null;
-  return cp;
+function outsideLock<T>(state: RewindState, operation: () => T | Promise<T>): Promise<T> {
+  const store = state.outside;
+  const generation = state.gen;
+  if (!store) return Promise.reject(new Error("Outside store unavailable"));
+  return withLock(join(store.storeDir, "snapshot.lock"), async () => {
+    if (generation !== state.gen) throw new Error("Session changed before outside operation");
+    return operation();
+  }, { lifetime: state.lifetime });
 }
 
 /** A checkpoint with no worktree behind it: an empty shadow snapshot, and the
@@ -205,7 +379,7 @@ async function projectlessCheckpoint(
 ): Promise<PromptCheckpoint | null> {
   if (!state.outside) return null;
   mkdirSync(state.outside.storeDir, { recursive: true, mode: 0o700 });
-  return withLock(join(state.outside.storeDir, "snapshot.lock"), async () => {
+  return outsideLock(state, async () => {
     const cp: PromptCheckpoint = {
       entryId,
       parentEntryId: state.currentEntryId,
@@ -215,9 +389,76 @@ async function projectlessCheckpoint(
       outside: state.outside?.snapshotTracked() ?? {},
     };
     state.checkpoints.set(entryId, cp);
+    try { persistLocalIndex(state); }
+    catch (error) { state.checkpoints.delete(entryId); throw error; }
     state.dirty = true;
     return cp;
   });
+}
+
+/** Observe the operation's exit without moving its before-prompt target/head.
+ * Metadata is private: no additional appendEntry or visible tree node. */
+export async function captureOperationAfter(state: RewindState): Promise<boolean> {
+  if (state.operationCapture) return state.operationCapture;
+  const entryId = state.operationEntryId;
+  const cp = entryId ? state.checkpoints.get(entryId) : undefined;
+  const store = state.outside;
+  const sessionId = state.sessionId;
+  if (!cp || !store || !sessionId) return false;
+  const generation = state.gen;
+  const head = state.head;
+  const refId = `op-${randomUUID()}`;
+  const previous = cp.after;
+  let workspace: Workspace | null = null;
+  let captureStarted = false;
+  const validate = () => {
+    if (state.gen !== generation || state.operationEntryId !== entryId || state.checkpoints.get(entryId!) !== cp || state.head !== head) {
+      throw new Error("operation position changed before after-snapshot publication");
+    }
+    assertRecoveryReady(state);
+  };
+  const publish = async (captured: { snapshot: WorkspaceSnapshot; unknown: string[] }) => {
+    validate();
+    const after: OperationSnapshot = {
+      refId, timestamp: Date.now(), snapshot: captured.snapshot,
+      outside: store.snapshotTracked(), projectModes: snapshotProjectModes(state), projectUnknown: captured.unknown,
+    };
+    if (!store.hasSnapshot(after.outside)) throw new Error("outside after-snapshot is unavailable or corrupt");
+    cp.after = after;
+    try { persistLocalIndex(state); }
+    catch (error) { cp.after = previous; throw error; }
+    // Not dirty: after-only metadata must never add a JSONL/tree entry at shutdown.
+    if (previous) await workspace?.deleteSnapshotRefLocked(sessionId, previous.refId).catch(() => {});
+  };
+  const pending = (async () => {
+    try {
+      if (state.disabled) {
+        await outsideLock(state, async () => publish({ snapshot: {}, unknown: [] }));
+      } else {
+        workspace = await waitReady(state);
+        if (!workspace) throw new Error(state.readyError ?? "workspace not ready");
+        await workspace.snapshotWithCoverage(head, `operation after ${entryId}`, state.forceTrack, {
+          ref: { sessionId, entryId: refId }, lockTimeoutMs: SNAPSHOT_LOCK_BUDGET_MS,
+          validate: () => { validate(); captureStarted = true; }, publish,
+        });
+      }
+      return true;
+    } catch (error) {
+      // A published private pointer owns its pin even if a later fsync failed.
+      if (workspace && captureStarted && !(error instanceof PrivateWriteError && error.published)) {
+        const ws = workspace;
+        await ws.withStoreLock(() => ws.deleteSnapshotRefLocked(sessionId, refId), SNAPSHOT_LOCK_BUDGET_MS, undefined, true).catch(() => {});
+      }
+      if (state.gen === generation) state.lastGap = `after-operation snapshot unavailable (before checkpoint retained): ${(error as Error).message}`;
+      return false;
+    }
+  })();
+  state.operationCapture = pending;
+  try { return await pending; }
+  finally {
+    if (state.operationCapture === pending) state.operationCapture = null;
+    if (state.gen === generation && state.operationEntryId === entryId) state.operationEntryId = null;
+  }
 }
 
 /** The shape of a plan that has no worktree half. */
@@ -231,10 +472,11 @@ export interface RestoreOutcome {
 /** Build the plan for going back to `cp`, having first snapshotted the current
  *  worktree so that the undo action in /rewind has somewhere to return to. */
 export async function planRestore(state: RewindState, cp: PromptCheckpoint): Promise<RestorePlan | null> {
+  assertRecoveryReady(state);
   const undoLabel = `before rewind to ${cp.prompt.slice(0, 40)}`;
   if (state.disabled) {
     if (!state.outside) return null;
-    return withLock(join(state.outside.storeDir, "snapshot.lock"), async () => ({
+    return outsideLock(state, async () => ({
       ...withOutside(state, EMPTY_PLAN, cp.outside),
       outsideFrom: state.outside?.snapshotTracked() ?? {},
       undoLabel,
@@ -248,14 +490,17 @@ export async function planRestore(state: RewindState, cp: PromptCheckpoint): Pro
   // Preview gets a temporary protected snapshot. The existing undo is not
   // replaced until apply actually begins, so cancelling preserves it.
   const pendingEntry = "undo-pending";
-  const now = await ws.snapshot(state.head, "pre-restore-preview", state.forceTrack, {
+  const captured = await ws.snapshotWithCoverage(state.head, "pre-restore-preview", state.forceTrack, {
     ref: state.sessionId ? { sessionId: state.sessionId, entryId: pendingEntry } : undefined,
   });
   try {
-    const worktreePlan = await ws.buildPlan(now, cp.snapshot);
+    const worktreePlan = protectUnknown(await ws.buildPlan(captured.snapshot, cp.snapshot), cp.projectUnknown ?? [""], cp.projectAbsent);
     return ws.withStoreLock(() => ({
       ...withOutside(state, worktreePlan, cp.outside),
+      projectUnknownFrom: captured.unknown,
       outsideFrom: state.outside?.snapshotTracked() ?? {},
+      projectModesTo: cp.projectModes,
+      projectModesFrom: snapshotProjectModes(state, Object.keys(cp.projectModes ?? {})),
       undoLabel,
       pendingRef: state.sessionId ? pendingEntry : undefined,
     }));
@@ -272,6 +517,9 @@ function withOutside(
   plan: RestorePlan,
   to: RestorePlan["outsideTo"],
 ): RestorePlan {
+  // A path may have temporarily become untrackable since the last preview.
+  // Re-adopt only registry-authorized targets so a retry captures its preimage.
+  state.outside?.adopt(Object.keys(to ?? {}));
   const items = state.outside?.plan(to) ?? [];
   if (!items.length) return { ...plan, outsideTo: to };
   return { ...plan, items: [...plan.items, ...items], outsideTo: to };
@@ -285,27 +533,33 @@ export async function discardRestorePlan(state: RewindState, plan: RestorePlan):
   if (ws) await ws.deleteSnapshotRef(state.sessionId, plan.pendingRef).catch(() => {});
 }
 
-async function publishUndo(state: RewindState, plan: RestorePlan, ws: Workspace | null): Promise<void> {
-  if (ws && state.sessionId) {
-    await ws.replaceSnapshotRef(plan.from, state.undo?.snapshot, state.sessionId, "undo");
-  }
-  state.undo = {
-    snapshot: plan.from,
-    outside: plan.outsideFrom,
-    timestamp: Date.now(),
-    label: plan.undoLabel ?? "before rewind",
-  };
-}
-
 export async function applyPlan(
   state: RewindState,
   preview: RestorePlan,
   opts: { includeTypeChanges?: boolean; includeOutside?: boolean } = {},
 ): Promise<ApplyResult | null> {
+  try { return await applyPlanChecked(state, preview, opts); }
+  catch (error) {
+    if (error instanceof RestorePreflightError) return { restored: 0, deleted: 0, skipped: [], errors: [error.message] };
+    throw error;
+  }
+}
+
+async function applyPlanChecked(
+  state: RewindState,
+  preview: RestorePlan,
+  opts: { includeTypeChanges?: boolean; includeOutside?: boolean },
+): Promise<ApplyResult | null> {
+  const generation = state.gen;
+  const validate = () => {
+    if (generation !== state.gen) throw new Error("Session changed before restore");
+    assertRecoveryReady(state);
+  };
   if (state.disabled) {
     if (!state.outside) return null;
     mkdirSync(state.outside.storeDir, { recursive: true, mode: 0o700 });
-    return withLock(join(state.outside.storeDir, "snapshot.lock"), async () => {
+    return outsideLock(state, async () => {
+      validate();
       const plan: RestorePlan = {
         ...withOutside(state, EMPTY_PLAN, preview.outsideTo),
         outsideFrom: state.outside?.snapshotTracked() ?? {},
@@ -317,15 +571,18 @@ export async function applyPlan(
         (item.action !== "type-change" || opts.includeTypeChanges),
       );
       if (!hasMutation) return { restored: 0, deleted: 0, skipped: [...plan.items], errors: [] };
-      await publishUndo(state, plan, null);
+      const transaction = await beginRestoreTransaction(state, "rewind", plan, opts, null);
       const result: ApplyResult = { restored: 0, deleted: 0, skipped: [], errors: [] };
       applyOutside(state, plan, opts, result);
+      await finishRestoreTransaction(state, transaction, result, null);
       return result;
     });
   }
 
   const ws = await waitReady(state);
   if (!ws || !state.outside) return null;
+  validate();
+  let transaction: RestoreTransaction;
   let worktreeClean = false;
   try {
     const outcome = await ws.applyFresh(
@@ -340,30 +597,33 @@ export async function applyPlan(
         publishEntry: "undo",
       },
       (worktreePlan, now) => ({
-        ...withOutside(state, worktreePlan, preview.outsideTo),
+        ...withOutside(state, protectUnknown(worktreePlan, preview.projectUnknownTo, preview.projectAbsentTo), preview.outsideTo),
         outsideFrom: state.outside?.snapshotTracked() ?? {},
+        projectModesTo: preview.projectModesTo,
+        projectModesFrom: snapshotProjectModes(state, Object.keys(preview.projectModesTo ?? {})),
         undoLabel: preview.undoLabel,
         pendingRef: state.sessionId ? (preview.pendingRef ?? "undo-pending") : undefined,
       }),
-      (plan) => plan.items.some((item) =>
+      (plan) => projectModeMapChangeCount(state, plan.projectModesTo) > 0 || plan.items.some((item) =>
         item.action !== "unprotected" &&
         (!isOutside(item) || opts.includeOutside) &&
         (item.action !== "type-change" || opts.includeTypeChanges),
       ),
-      (now, plan) => {
-        state.undo = {
-          snapshot: now,
-          outside: plan.outsideFrom,
-          timestamp: Date.now(),
-          label: plan.undoLabel ?? "before rewind",
-        };
+      async (_now, plan) => {
+        validate();
+        transaction = await beginRestoreTransaction(state, "rewind", plan, opts, ws);
       },
-      (lockedResult, plan) => {
+      async (lockedResult, plan) => {
+        if (generation === state.gen) {
+          applyOutside(state, plan, opts, lockedResult);
+          restoreProjectModeMap(state, plan.projectModesTo, lockedResult);
+        } else lockedResult.errors.push("Session changed; remaining outside/permission writes were skipped");
+        await finishRestoreTransaction(state, transaction, lockedResult, ws);
         worktreeClean = lockedResult.errors.length === 0;
-        applyOutside(state, plan, opts, lockedResult);
       },
+      validate,
     );
-    if (outcome.applied && worktreeClean) state.head = outcome.plan.to;
+    if (generation === state.gen && outcome.applied && worktreeClean) state.head = outcome.plan.to;
     return outcome.result;
   } catch (error) {
     await discardRestorePlan(state, preview);
@@ -402,11 +662,12 @@ export interface UndoPreparation {
 }
 
 export async function planUndo(state: RewindState): Promise<UndoPreparation | null> {
+  assertRecoveryReady(state, true);
   if (!state.undo || !state.outside) return null;
   if (state.disabled) {
     mkdirSync(state.outside.storeDir, { recursive: true, mode: 0o700 });
-    return withLock(join(state.outside.storeDir, "snapshot.lock"), async () => ({
-      plan: withOutside(state, EMPTY_PLAN, state.undo?.outside),
+    return outsideLock(state, async () => ({
+      plan: { ...withOutside(state, EMPTY_PLAN, state.undo?.outside), outsideFrom: state.outside?.snapshotTracked() ?? {} },
       target: {},
     }));
   }
@@ -416,11 +677,17 @@ export async function planUndo(state: RewindState): Promise<UndoPreparation | nu
   const target = state.undo.snapshot;
   // Fixed ref: previewing repeatedly stays bounded. It does not replace the
   // current undo ref/state, so cancelling the preview preserves the last undo.
-  const now = await ws.snapshot(state.head, "pre-undo-preview", state.forceTrack, {
+  const captured = await ws.snapshotWithCoverage(state.head, "pre-undo-preview", state.forceTrack, {
     ref: state.sessionId ? { sessionId: state.sessionId, entryId: "undo-prev" } : undefined,
   });
-  const worktreePlan = await ws.buildPlan(now, target);
-  const plan = await ws.withStoreLock(() => withOutside(state, worktreePlan, state.undo?.outside));
+  const worktreePlan = protectUnknown(await ws.buildPlan(captured.snapshot, target), state.undo.projectUnknown ?? [""], state.undo.projectAbsent);
+  const plan = await ws.withStoreLock(() => ({
+    ...withOutside(state, worktreePlan, state.undo?.outside),
+    projectUnknownFrom: captured.unknown,
+    outsideFrom: state.outside?.snapshotTracked() ?? {},
+    projectModesTo: state.undo?.projectModes,
+    projectModesFrom: snapshotProjectModes(state, Object.keys(state.undo?.projectModes ?? {})),
+  }));
   return { plan, target };
 }
 
@@ -429,148 +696,187 @@ export async function applyUndo(
   prepared?: UndoPreparation,
   opts: { includeTypeChanges?: boolean } = {},
 ): Promise<ApplyResult | null> {
-  const undo = prepared ?? (await planUndo(state));
-  if (!undo || !state.undo || !state.outside) return null;
-  const originalUndo = state.undo;
-
-  let result: ApplyResult;
-  let reverseUndo: RewindState["undo"] = null;
-  let promotionWorkspace: Workspace | null = null;
-  let didApply = false;
-  if (state.disabled) {
-    mkdirSync(state.outside.storeDir, { recursive: true, mode: 0o700 });
-    result = await withLock(join(state.outside.storeDir, "snapshot.lock"), async () => {
-      const outsideBefore = state.outside?.snapshotTracked() ?? {};
-      const freshPlan = withOutside(state, EMPTY_PLAN, state.undo?.outside);
-      const lockedResult: ApplyResult = { restored: 0, deleted: 0, skipped: [], errors: [] };
-      reverseUndo = { snapshot: {}, outside: outsideBefore, timestamp: Date.now(), label: "before undo" };
-      applyOutside(state, freshPlan, { includeTypeChanges: opts.includeTypeChanges, includeOutside: true }, lockedResult);
-      return lockedResult;
-    });
-    didApply = result.restored + result.deleted > 0;
-  } else {
-    const ws = await waitReady(state);
-    if (!ws) return null;
-    const outcome = await ws.applyFresh(
-      state.head,
-      undo.target,
-      state.forceTrack,
-      { includeTypeChanges: opts.includeTypeChanges },
-      {
-        sessionId: state.sessionId ?? undefined,
-        pendingEntry: "undo-prev",
-        keepPending: true,
-      },
-      (worktreePlan) => ({
-        ...withOutside(state, worktreePlan, state.undo?.outside),
-        outsideFrom: state.outside?.snapshotTracked() ?? {},
-        undoLabel: "before undo",
-      }),
-      (plan) => plan.items.some((item) =>
-        item.action !== "unprotected" &&
-        (item.action !== "type-change" || opts.includeTypeChanges),
-      ),
-      (now, plan) => {
-        reverseUndo = {
-          snapshot: now,
-          outside: plan.outsideFrom,
-          timestamp: Date.now(),
-          label: "before undo",
-        };
-      },
-      (lockedResult, plan) => {
-        applyOutside(
-          state,
-          plan,
-          { includeTypeChanges: opts.includeTypeChanges, includeOutside: true },
-          lockedResult,
-        );
-      },
-    );
-    result = outcome.result;
-    didApply = outcome.applied;
-    promotionWorkspace = ws;
-    reverseUndo = {
-      snapshot: outcome.undoSnapshot,
-      outside: outcome.plan.outsideFrom,
-      timestamp: Date.now(),
-      label: "before undo",
-    };
+  try { return await applyUndoChecked(state, prepared, opts); }
+  catch (error) {
+    if (error instanceof RestorePreflightError) return { restored: 0, deleted: 0, skipped: [], errors: [error.message] };
+    throw error;
   }
-
-  // A skipped type change means the undo is intentionally incomplete and must
-  // remain retryable after the user inspects/confirms it.
-  const incomplete = result.skipped.some((item) => item.action === "type-change");
-  if (didApply && result.errors.length === 0 && !incomplete && reverseUndo) {
-    if (promotionWorkspace && state.sessionId) {
-      await promotionWorkspace.replaceSnapshotRef(
-        reverseUndo.snapshot,
-        originalUndo.snapshot,
-        state.sessionId,
-        "undo",
-      );
-      await promotionWorkspace.deleteSnapshotRef(state.sessionId, "undo-prev").catch(() => {});
-    }
-    state.undo = reverseUndo;
-    if (!state.disabled) state.head = undo.target;
-  } else {
-    // Failed/skipped undo must remain retryable at the original destination.
-    state.undo = originalUndo;
-  }
-  return result;
 }
 
-/** Walk up the session tree to the nearest ancestor that has a checkpoint, so
- *  selecting an assistant message or tool call still resolves to something. */
+async function applyUndoChecked(
+  state: RewindState,
+  prepared: UndoPreparation | undefined,
+  opts: { includeTypeChanges?: boolean },
+): Promise<ApplyResult | null> {
+  const generation = state.gen;
+  const validate = () => {
+    if (generation !== state.gen) throw new Error("Session changed before Undo");
+    assertRecoveryReady(state, true);
+    assertUndoTargetsAvailable(state);
+  };
+  const undo = prepared ?? (await planUndo(state));
+  if (!undo || !state.undo || !state.outside) return null;
+  const options = { ...opts, includeOutside: true };
+  const shouldApply = (plan: RestorePlan) => projectModeMapChangeCount(state, plan.projectModesTo) > 0 || plan.items.some(item =>
+    item.action !== "unprotected" && (item.action !== "type-change" || opts.includeTypeChanges));
+  if (state.disabled) {
+    return outsideLock(state, async () => {
+      validate();
+      const plan = {
+        ...withOutside(state, EMPTY_PLAN, state.undo?.outside),
+        outsideFrom: state.outside?.snapshotTracked() ?? {}, undoLabel: "before undo",
+      };
+      await assertRecoveryPreview(state, undo.plan, plan, null);
+      if (!shouldApply(plan)) {
+        await finishRecoveryNoop(state, plan, null);
+        return { restored: 0, deleted: 0, skipped: [...plan.items], errors: [] };
+      }
+      const transaction = await beginRestoreTransaction(state, "undo", plan, options, null);
+      const result: ApplyResult = { restored: 0, deleted: 0, skipped: [], errors: [] };
+      applyOutside(state, plan, options, result);
+      await finishRestoreTransaction(state, transaction, result, null);
+      return result;
+    });
+  }
+  const ws = await waitReady(state);
+  if (!ws) return null;
+  validate();
+  let transaction: RestoreTransaction;
+  const outcome = await ws.applyFresh(
+    state.head, undo.target, state.forceTrack, opts,
+    { sessionId: state.sessionId ?? undefined, pendingEntry: "undo-prev" },
+    async (worktreePlan) => {
+      validate();
+      const plan = {
+        ...withOutside(state, protectUnknown(worktreePlan, state.undo?.projectUnknown ?? [""], state.undo?.projectAbsent), state.undo?.outside),
+        outsideFrom: state.outside?.snapshotTracked() ?? {},
+        projectModesTo: state.undo?.projectModes,
+        projectModesFrom: snapshotProjectModes(state, Object.keys(state.undo?.projectModes ?? {})),
+        undoLabel: "before undo",
+      };
+      await assertRecoveryPreview(state, undo.plan, plan, ws);
+      return plan;
+    },
+    shouldApply,
+    async (_now, plan) => {
+      validate();
+      transaction = await beginRestoreTransaction(state, "undo", plan, options, ws);
+    },
+    async (result, plan) => {
+      if (generation === state.gen) {
+        applyOutside(state, plan, options, result);
+        restoreProjectModeMap(state, plan.projectModesTo, result);
+      } else result.errors.push("Session changed; remaining outside/permission writes were skipped");
+      await finishRestoreTransaction(state, transaction, result, ws);
+    },
+    validate,
+    (plan) => finishRecoveryNoop(state, plan, ws),
+  );
+  const incomplete = hasRequiredUndoItems(outcome.result.skipped);
+  if (generation === state.gen && outcome.applied && outcome.result.errors.length === 0 && !incomplete) state.head = undo.target;
+  return outcome.result;
+}
+
+/** Before-state belongs to its exact user prompt, not its descendants. Falling
+ * back from an assistant/tool/uncheckpointed node restores too far backwards. */
 export function pickCheckpointForEntry(
   state: RewindState,
   entryId: string,
   getEntry: (id: string) => unknown,
 ): PromptCheckpoint | undefined {
-  if (state.checkpoints.has(entryId)) return state.checkpoints.get(entryId);
-  let cur = getEntry(entryId) as { id?: string; parentId?: string } | null;
-  const seen = new Set<string>();
-  while (cur?.id && !seen.has(cur.id)) {
-    seen.add(cur.id);
-    if (state.checkpoints.has(cur.id)) return state.checkpoints.get(cur.id);
-    cur = cur.parentId ? (getEntry(cur.parentId) as typeof cur) : null;
-  }
-  return undefined;
+  const entry = getEntry(entryId) as { id?: string; type?: string; message?: { role?: string } } | undefined;
+  if (entry?.id !== entryId || entry.type !== "message" || entry.message?.role !== "user") return undefined;
+  return state.checkpoints.get(entryId);
 }
 
-export function persistIndex(pi: ExtensionAPI, state: RewindState): void {
+function serializeBefore(cp: PromptCheckpoint): string {
+  const { after: _after, ...before } = cp;
+  return JSON.stringify(before);
+}
+
+function batchOnBranch(branch: unknown[] | undefined, token: string): boolean {
+  return (branch as { type?: string; customType?: string; data?: { token?: unknown } }[] | undefined)
+    ?.some(entry => entry?.type === "custom" && entry.customType === CUSTOM_TYPE && entry.data?.token === token) ?? false;
+}
+
+/**
+ * Publish before-checkpoint metadata to the session tree. Only changed objects
+ * are appended, as a delta chained to the previous batch. A complete base is
+ * republished when that previous batch is not on the active branch (tree
+ * navigation), when the session owner changed (fork child), or when the caller
+ * cannot supply the branch. Otherwise a fork whose history skipped the batch
+ * that created an older checkpoint would lose it.
+ */
+export function persistIndex(pi: ExtensionAPI, state: RewindState, branch?: unknown[]): void {
   if (!state.sessionId || !state.dirty) return;
-  pi.appendEntry(CUSTOM_TYPE, {
-    version: 3,
+  const current = new Map<string, string>();
+  for (const cp of state.checkpoints.values()) current.set(cp.entryId, serializeBefore(cp));
+  const previous = state.publishedBatch;
+  const base = !previous || previous.sessionId !== state.sessionId || !branch || !batchOnBranch(branch, previous.token);
+  const changed = [...current].filter(([id, sig]) => base || state.publishedIndex.get(id) !== sig);
+  const removed = base ? [] : [...state.publishedIndex.keys()].filter(id => !current.has(id));
+  if (!changed.length && !removed.length) {
+    state.dirty = false;
+    return;
+  }
+  const token = randomUUID();
+  const batch: PersistedIndex = {
+    version: 5,
+    kind: base ? "base" : "delta",
+    token,
+    parent: base ? null : previous!.token,
+    localRevision: state.checkpointRevision,
     sessionId: state.sessionId,
-    checkpoints: [...state.checkpoints.values()],
-  });
+    // Detached copies: later in-memory first-touch updates must not alias history.
+    checkpoints: changed.map(([, sig]) => JSON.parse(sig) as PromptCheckpoint),
+    removed,
+  };
+  pi.appendEntry(CUSTOM_TYPE, batch);
+  state.publishedIndex = current;
+  state.publishedBatch = { token, sessionId: state.sessionId };
+  state.indexRevision = state.checkpointRevision;
   state.dirty = false;
 }
 
-function validCheckpoint(value: unknown): value is PromptCheckpoint {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const cp = value as Partial<PromptCheckpoint>;
-  if (typeof cp.entryId !== "string" || !cp.entryId || cp.entryId.length > 512) return false;
-  if (!cp.snapshot || typeof cp.snapshot !== "object" || Array.isArray(cp.snapshot)) return false;
-  for (const [sub, sha] of Object.entries(cp.snapshot)) {
-    if (sub.includes("\0") || isAbsolute(sub) || sub.split("/").includes("..")) return false;
-    if (typeof sha !== "string" || !/^[0-9a-f]{40,64}$/.test(sha)) return false;
-  }
-  return true;
-}
-
+/**
+ * Replay published batches in file order. Legacy full arrays and bases replace
+ * the map. A delta whose parent is not the immediately preceding batch has an
+ * incomplete chain: its complete objects are still applied (an older object
+ * covers less, never wrong bytes), removals are ignored, and the gap is reported.
+ */
 export function loadIndex(state: RewindState, entries: unknown[]): void {
-  let latest: { checkpoints?: PromptCheckpoint[] } | null = null;
+  let checkpoints: Map<string, PromptCheckpoint> | null = null;
+  let revisions = new Map<string, number>();
+  let last: PersistedIndex | null = null;
+  let gap = false;
   for (const entry of entries as { type?: string; customType?: string; data?: unknown }[]) {
-    if (entry.type === "custom" && entry.customType === CUSTOM_TYPE && entry.data) {
-      latest = entry.data as { checkpoints?: PromptCheckpoint[] };
+    if (entry.type !== "custom" || entry.customType !== CUSTOM_TYPE || !entry.data) continue;
+    const data = entry.data as PersistedIndex;
+    if (!Array.isArray(data.checkpoints)) continue;
+    const delta = data.version === 5 && data.kind === "delta";
+    if (delta && (typeof data.token !== "string" || typeof data.parent !== "string")) continue;
+    if (delta && data.parent !== last?.token) gap = true;
+    if (!delta || !checkpoints) { checkpoints = new Map(); revisions = new Map(); gap = delta && gap; }
+    if (delta && data.parent === last?.token) for (const id of data.removed ?? []) { checkpoints.delete(String(id)); revisions.delete(String(id)); }
+    const revision = Number.isSafeInteger(data.localRevision) && data.localRevision! >= 0 ? data.localRevision! : 0;
+    for (const cp of data.checkpoints) {
+      if (!validCheckpoint(cp)) continue;
+      // Operation observations belong to the private originating session, not forks.
+      const { after: _after, ...before } = cp;
+      checkpoints.set(before.entryId, JSON.parse(JSON.stringify(before)));
+      revisions.set(before.entryId, revision);
     }
+    last = data;
   }
-  if (!Array.isArray(latest?.checkpoints)) return;
-  for (const cp of latest.checkpoints) {
-    if (validCheckpoint(cp)) state.checkpoints.set(cp.entryId, cp);
-  }
+  if (!checkpoints || !last) return;
+  state.indexRevision = Number.isSafeInteger(last.localRevision) && last.localRevision! >= 0 ? last.localRevision! : 0;
+  for (const [id, cp] of checkpoints) state.checkpoints.set(id, cp);
+  state.indexObjectRevision = revisions;
+  state.publishedIndex = new Map([...checkpoints].map(([id, cp]) => [id, serializeBefore(cp)]));
+  state.publishedBatch = last.version === 5 && typeof last.token === "string" && typeof last.sessionId === "string"
+    ? { token: last.token, sessionId: last.sessionId }
+    : null;
+  if (gap) state.lastGap = "checkpoint index chain incomplete; some coverage metadata may be older";
 }
 
 export function restorePosition(state: RewindState, branchEntries: unknown[]): void {

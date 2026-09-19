@@ -4,14 +4,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import contextSnapshots, {
+import {
   PERMISSION_MODE_CONTEXT_TYPE,
   RUNTIME_CONTEXT_TYPE,
   keepLatestContextSnapshots,
   projectCurrentContextSnapshots,
-  setCurrentContextSnapshot,
-} from "../extensions/context-snapshots.ts";
-import runtimeContext, { buildRuntimeSnapshot } from "../extensions/runtime-context.ts";
+} from "../extensions/lib/context-snapshots.ts";
+import runtimeContext, { createRuntimeSnapshotter } from "../extensions/runtime-context.ts";
 
 const custom = (customType, content) => ({
   role: "custom",
@@ -43,40 +42,30 @@ test("outgoing context keeps only each newest managed snapshot without mutating 
       ["unrelated", "keep-one"],
       [RUNTIME_CONTEXT_TYPE, "runtime-new"],
       ["unrelated", "keep-two"],
-      [PERMISSION_MODE_CONTEXT_TYPE, "mode-new"],
     ],
   );
   assert.equal(filtered.some((message) => message.role === "compactionSummary"), true);
 
   let handler;
-  contextSnapshots({ on(name, candidate) { if (name === "context") handler = candidate; } });
+  runtimeContext({ on(name, candidate) { if (name === "context") handler = candidate; } });
   assert.deepEqual(handler({ messages }).messages, filtered);
 });
 
 test("current snapshots are reinserted when compaction removed their durable messages", () => {
-  try {
-    setCurrentContextSnapshot(RUNTIME_CONTEXT_TYPE, "runtime-current");
-    setCurrentContextSnapshot(PERMISSION_MODE_CONTEXT_TYPE, "mode-current");
-    const compacted = [{ role: "compactionSummary", summary: "older context", tokensBefore: 100, timestamp: 3 }];
-    const projected = projectCurrentContextSnapshots(compacted);
-    assert.deepEqual(
-      projected.filter((message) => message.role === "custom").map((message) => [message.customType, message.content]),
-      [
-        [RUNTIME_CONTEXT_TYPE, "runtime-current"],
-        [PERMISSION_MODE_CONTEXT_TYPE, "mode-current"],
-      ],
-    );
-    assert.deepEqual(projectCurrentContextSnapshots(projected), projected, "repeated projection must not duplicate snapshots");
+  const compacted = [{ role: "compactionSummary", summary: "older context", tokensBefore: 100, timestamp: 3 }];
+  const projected = projectCurrentContextSnapshots(compacted, "runtime-current");
+  assert.deepEqual(
+    projected.filter((message) => message.role === "custom").map((message) => [message.customType, message.content]),
+    [[RUNTIME_CONTEXT_TYPE, "runtime-current"]],
+  );
+  assert.deepEqual(projectCurrentContextSnapshots(projected, "runtime-current"), projected, "repeated projection must not duplicate snapshots");
 
-    const stale = projectCurrentContextSnapshots([
-      custom(RUNTIME_CONTEXT_TYPE, "runtime-stale"),
-      custom(PERMISSION_MODE_CONTEXT_TYPE, "mode-stale"),
-    ]);
-    assert.deepEqual(stale.map((message) => message.content), ["runtime-current", "mode-current"]);
-  } finally {
-    setCurrentContextSnapshot(RUNTIME_CONTEXT_TYPE, null);
-    setCurrentContextSnapshot(PERMISSION_MODE_CONTEXT_TYPE, null);
-  }
+  const stale = projectCurrentContextSnapshots([
+    custom(RUNTIME_CONTEXT_TYPE, "runtime-stale"),
+    custom(PERMISSION_MODE_CONTEXT_TYPE, "mode-stale"),
+  ], "runtime-current");
+  assert.deepEqual(stale.map((message) => message.content), ["runtime-current"]);
+  assert.deepEqual(projectCurrentContextSnapshots(compacted, null), compacted);
 });
 
 test("snapshot projection is branch-local", () => {
@@ -92,7 +81,7 @@ test("snapshot projection is branch-local", () => {
   assert.equal(branchB[0].content, "b-new");
 });
 
-test("runtime context recovers the active branch after tree navigation and omits duplicate cwd", () => {
+test("runtime context recovers the active branch after tree navigation and omits duplicate cwd", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-runtime-context-"));
   try {
     const handlers = new Map();
@@ -106,26 +95,42 @@ test("runtime context recovers the active branch after tree navigation and omits
       cwd,
       sessionManager: { getBranch: () => branch },
     };
-    const current = buildRuntimeSnapshot(cwd);
+    const current = await createRuntimeSnapshotter().build(cwd);
     assert.equal(current.includes(cwd), false);
     assert.equal(current.includes("Working directory:"), false);
 
     branch = [{ type: "custom_message", customType: RUNTIME_CONTEXT_TYPE, content: current }];
     handlers.get("session_start")({}, ctx);
-    assert.equal(handlers.get("before_agent_start")({}, ctx), undefined);
+    assert.equal(await handlers.get("before_agent_start")({}, ctx), undefined);
 
     branch = [{ type: "custom_message", customType: RUNTIME_CONTEXT_TYPE, content: "stale" }];
     handlers.get("session_tree")({}, ctx);
-    const emitted = handlers.get("before_agent_start")({}, ctx);
+    const emitted = await handlers.get("before_agent_start")({}, ctx);
     assert.equal(emitted.message.customType, RUNTIME_CONTEXT_TYPE);
     assert.equal(emitted.message.content, current);
 
     branch = [{ type: "custom_message", customType: RUNTIME_CONTEXT_TYPE, content: current }];
     handlers.get("session_tree")({}, ctx);
-    assert.equal(handlers.get("before_agent_start")({}, ctx), undefined);
+    assert.equal(await handlers.get("before_agent_start")({}, ctx), undefined);
   } finally {
-    setCurrentContextSnapshot(RUNTIME_CONTEXT_TYPE, null);
-    setCurrentContextSnapshot(PERMISSION_MODE_CONTEXT_TYPE, null);
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("async git snapshot reuses the last good value after a bounded query failure", async () => {
+  let now = new Date("2026-09-02T10:00:00Z").getTime();
+  let calls = 0;
+  const snapshots = createRuntimeSnapshotter(async (_cwd, timeoutMs) => {
+    assert.equal(timeoutMs, 2_000);
+    calls++;
+    if (calls === 1) return "## main...origin/main\n M changed.ts\n";
+    throw new Error("synthetic timeout");
+  }, () => now, 10);
+
+  const first = await snapshots.build("/synthetic/repo");
+  assert.match(first, /Git: branch main, 1 dirty file/);
+  now += 11;
+  const second = await snapshots.build("/synthetic/repo");
+  assert.equal(second, first, "a timeout must not churn the emitted snapshot");
+  assert.equal(calls, 2);
 });

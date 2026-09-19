@@ -36,9 +36,13 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { markOrigin } from "./reaper.js";
+import { readRecovery, recoveryPath, recoveryProtection, removeCompletedRecovery } from "./recovery.js";
+import { checkpointStatePath } from "./checkpoint-store.js";
+import { readBoundedRegular, readPrivateJson } from "./storage.js";
 import {
   type Stats,
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -245,6 +249,32 @@ export class OutsideStore {
     return clean;
   }
 
+  /** Validate immediately before restore: sanitization must not silently reduce
+   * coverage, and every promised replacement must still have intact content. */
+  hasSnapshot(snapshot: OutsideSnapshot | undefined): boolean {
+    if (snapshot === undefined) return true;
+    try {
+      const clean = this.sanitizeSnapshot(snapshot);
+      if (!clean || Reflect.ownKeys(snapshot).length !== Object.keys(clean).length) return false;
+      for (const path of Reflect.ownKeys(snapshot)) {
+        if (typeof path !== "string" || !Object.hasOwn(clean, path)) return false;
+        const descriptor = Object.getOwnPropertyDescriptor(snapshot, path)!;
+        if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return false;
+        const entry = descriptor.value;
+        const target = clean[path];
+        if (Reflect.ownKeys(entry).length !== Object.keys(target).length) return false;
+        for (const [key, value] of Object.entries(target)) {
+          const field = Object.getOwnPropertyDescriptor(entry, key);
+          if (!field?.enumerable || !Object.hasOwn(field, "value") || field.value !== value) return false;
+        }
+        if (!isAbsent(target) && !Buffer.isBuffer(this.readBlob(target.sha))) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Record what `path` looks like before the agent writes to it, and back-fill
    * that baseline into checkpoints taken earlier in this session.
@@ -410,8 +440,8 @@ export class OutsideStore {
       // blob can be pruned between plan and apply; that must leave user data
       // intact rather than turn a confirmed replacement into pure deletion.
       const buf = this.readBlob(item.targetSha);
-      if (!buf) {
-        result.errors.push(`missing snapshot for ${item.display}; original left untouched`);
+      if (!Buffer.isBuffer(buf)) {
+        result.errors.push(`missing or corrupt snapshot for ${item.display}; original left untouched`);
         continue;
       }
 
@@ -467,11 +497,42 @@ export class OutsideStore {
     return result;
   }
 
-  /** Blobs are content-addressed and re-created on the next touch, so age is a
-   *  safe eviction key: the worst case is an old checkpoint whose plan says
-   *  "snapshot pruned" instead of silently restoring nothing. */
-  maintain(maxAgeDays = 30): void {
+  /** Caller holds snapshot.lock. Age may evict old checkpoint content, but
+   * durable Undo and unfinished recovery must retain every referenced blob. */
+  maintain(maxAgeDays = 30, keepSessionId?: string): void {
+    let protection = recoveryProtection(this.storeDir);
+    if (protection.unsafe) return;
     const cutoff = Date.now() - maxAgeDays * 86400_000;
+    // Workspace sessions expire alongside Git refs. Projectless sessions have
+    // no refs, so completed Undo follows the blob store's existing age policy.
+    if (this.projectless) {
+      try {
+        const dir = join(this.storeDir, "recovery");
+        const names = existsSync(dir) ? readdirSync(dir) : [];
+        const expired: string[] = [];
+        for (const name of names) {
+          if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
+          const path = join(dir, name);
+          const raw = readPrivateJson(path) as { sessionId?: unknown } | null;
+          if (typeof raw?.sessionId !== "string") return;
+          const record = readRecovery(this.storeDir, this.cwd, raw.sessionId);
+          if (!record || recoveryPath(this.storeDir, record.sessionId) !== path) return;
+          if (record.journal || record.sessionId === keepSessionId) continue;
+          let recent = Math.max(record.undo?.timestamp ?? 0, lstatSync(path).mtimeMs);
+          try {
+            const cp = lstatSync(checkpointStatePath(this.storeDir, record.sessionId));
+            if (!cp.isFile() || cp.isSymbolicLink()) return;
+            recent = Math.max(recent, cp.mtimeMs);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+          }
+          if (recent < cutoff) expired.push(record.sessionId);
+        }
+        for (const session of expired) removeCompletedRecovery(this.storeDir, this.cwd, session);
+        protection = recoveryProtection(this.storeDir);
+        if (protection.unsafe) return;
+      } catch { return; }
+    }
     let dirs: string[];
     try {
       dirs = readdirSync(this.blobDir);
@@ -487,6 +548,7 @@ export class OutsideStore {
         continue;
       }
       for (const f of files) {
+        if (protection.outsideBlobs.has(f)) continue;
         const p = join(sub, f);
         try {
           if (statSync(p).mtimeMs < cutoff) rmSync(p, { force: true });
@@ -572,9 +634,21 @@ export class OutsideStore {
     }
   }
 
-  private readBlob(sha: string): Buffer | null {
+  /** Target bytes for a plan item of this store; null when pruned or corrupt,
+   *  `"large"` (checked before reading) when over `maxBytes`. */
+  targetBlob(item: PlanItem, maxBytes = MAX_BYTES): Buffer | null | "large" {
+    if (!item.targetSha) return null;
+    return this.readBlob(item.targetSha, Math.min(maxBytes, MAX_BYTES));
+  }
+
+  /** Bounded, no-follow descriptor read: a blob that grows or is swapped for a
+   *  symlink after being listed is refused, and the hash covers the bytes read. */
+  private readBlob(sha: string, maxBytes = MAX_BYTES): Buffer | null | "large" {
+    if (!/^[0-9a-f]{64}$/.test(sha)) return null;
     try {
-      return readFileSync(this.blobPath(sha));
+      const buf = readBoundedRegular(this.blobPath(sha), maxBytes);
+      if (buf === null || buf === "large") return buf;
+      return createHash("sha256").update(buf).digest("hex") === sha ? buf : null;
     } catch {
       return null;
     }

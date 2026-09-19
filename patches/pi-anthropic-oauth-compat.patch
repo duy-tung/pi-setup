@@ -1,0 +1,446 @@
+--- a/README.md
++++ b/README.md
+@@ -6,6 +6,40 @@
+ everything on top is this repo's work — see the diff.
+ 
+ ## What's added
++
++### Local Fable 5.1 compatibility patch (2026-09-06)
++
++This checkout is based on v0.3.2 with a checksum-pinned compatibility patch
++reproduced by pi-setup.
++OAuth inference now sends `claude-code/2.1.261`, matching the installed official
++Claude Code release. The previous `2.1.97` header receives HTTP 400
++`claude_code_version_too_old` for `claude-fable-5-1`; that route requires at least
++`2.1.251`. Login credentials, payload construction, and cache behavior are unchanged.
++Header and mocked wire-request tests cover this regression. This static version is
++not auto-discovered or updated; future provider version requirements may need another
++reviewed update.
++
++pi-setup applies and verifies the patch over its pinned Git package rather than
++relying on a machine-specific local package path. No release has been published or
++pushed. Keepalive cancellation now also runs when switching away from Anthropic;
++it clears pending timers, aborts pings and invalidates late request completions.
++
++### Native thinking effort (local patch, 2026-09-06)
++
++Adaptive models now use native effort instead of the legacy token-budget mapping.
++Fable 5.1 declares `supportsMidConvoEffort`; following Pi 0.85.1, its requests carry
++both managed-effort betas, adaptive thinking with prefix-mismatch block handling,
++and system-role `output_config` messages for historical and current effort. The
++request-level baseline remains `high`; the final effort message selects the actual
++next-turn level, such as `medium`. Responses retain `providerThinkingLevel` so a
++later request can replay the original effort. The last user cache breakpoint stays
++before the appended current-effort message.
++
++Other `forceAdaptiveThinking` models use request-level native effort. Older models
++keep their existing budget-based thinking. These wire additions are typed locally
++because the pinned Anthropic SDK predates them; no dependency upgrade is required.
++The new `test/thinking.test.mjs` covers native medium, level mappings, historical
++replay, legacy behavior, required headers and the actual serialized request.
+ 
+ ### Pi 0.84.3 provider compatibility
+ 
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -16,7 +16,9 @@
+   "user:mcp_servers",
+   "user:file_upload",
+ ].join(" ");
+-const USER_AGENT = "claude-code/2.1.97";
++// Fable 5.1 requires Claude Code >=2.1.251 on the OAuth inference route.
++// Match the locally verified Claude Code release (2026-09-06).
++const USER_AGENT = "claude-code/2.1.261";
+ const CALLBACK_PORT = 53692;
+ const CALLBACK_HOST = "127.0.0.1";
+ const LOCAL_CALLBACK_TIMEOUT = 5 * 60 * 1000;
+--- a/src/convert.ts
++++ b/src/convert.ts
+@@ -23,6 +23,19 @@
+ } from "@earendil-works/pi-ai";
+ import { sanitizeSurrogates } from "./prompt.js";
+ 
++export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
++
++export function isAnthropicEffort(value: unknown): value is AnthropicEffort {
++  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max";
++}
++
++// The installed Anthropic SDK predates managed, per-turn effort messages.
++export type AnthropicMessageParam = MessageParam | {
++  role: "system";
++  content: [];
++  output_config: { effort: AnthropicEffort };
++};
++
+ export type IndexedBlock =
+   | (TextContent & { index: number })
+   | (ThinkingContent & { index: number; thinkingSignature?: string })
+@@ -72,8 +85,9 @@
+   messages: Message[],
+   isOAuth: boolean,
+   model: Pick<Model<Api>, "provider" | "api" | "id">,
+-): MessageParam[] {
+-  const params: MessageParam[] = [];
++  activeEffort?: AnthropicEffort,
++): AnthropicMessageParam[] {
++  const params: AnthropicMessageParam[] = [];
+   const toolIdMap = new Map<string, string>();
+   const usedToolIds = new Set<string>();
+ 
+@@ -191,6 +205,11 @@
+         }
+       }
+       if (blocks.length > 0) {
++        const historicalEffort = (message as typeof message & { providerThinkingLevel?: unknown }).providerThinkingLevel;
++        if (activeEffort !== undefined && message.provider === model.provider &&
++            message.api === "anthropic-messages" && isAnthropicEffort(historicalEffort)) {
++          params.push({ role: "system", content: [], output_config: { effort: historicalEffort } });
++        }
+         params.push({ role: "assistant", content: blocks });
+         pendingToolUseIds = emittedToolUseIds;
+       }
+@@ -256,6 +275,11 @@
+         : { type: "ephemeral" };
+   }
+ 
++  // Append after caching the last user block: the active effort must govern the
++  // next generated turn without moving the stable conversation cache breakpoint.
++  if (activeEffort !== undefined) {
++    params.push({ role: "system", content: [], output_config: { effort: activeEffort } });
++  }
+   return params;
+ }
+ 
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -28,6 +28,11 @@
+   cancel: () => void = cancelCacheKeepalive,
+ ): void {
+   pi.on("session_shutdown", () => cancel());
++  pi.on("model_select", (event) => {
++    // A provider switch must not keep replaying the previous Anthropic request.
++    // cancel() also invalidates an in-flight request's eventual keepalive state.
++    if (event.model.provider !== "anthropic") cancel();
++  });
+ }
+ 
+ export function registerAnthropicProvider(pi: ExtensionAPI): void {
+--- a/src/stream.ts
++++ b/src/stream.ts
+@@ -28,6 +28,9 @@
+   convertPiMessagesToAnthropic,
+   convertPiToolsToAnthropic,
+   fromClaudeCodeToolName,
++  isAnthropicEffort,
++  type AnthropicEffort,
++  type AnthropicMessageParam,
+   type IndexedBlock,
+ } from "./convert.js";
+ import { buildAnthropicSystemPrompt } from "./prompt.js";
+@@ -51,10 +54,29 @@
+ // extension asks for the beta while contributing unrelated headers.
+ const BLOCKED_BETAS = new Set([FINE_GRAINED_TOOL_STREAMING_BETA]);
+ 
+-export type AnthropicRequestParams = MessageCreateParamsStreaming & {
++export type AnthropicRequestParams = Omit<MessageCreateParamsStreaming, "messages" | "thinking"> & {
++  messages: AnthropicMessageParam[];
++  thinking?: MessageCreateParamsStreaming["thinking"] | {
++    type: "adaptive";
++    display?: "summarized";
++    block_binding?: { prefix_mismatch_behavior: "drop_block" };
++  };
++  output_config?: { effort: AnthropicEffort };
+   fallbacks?: Array<{ model: string }>;
+   speed?: "fast";
+ };
++
++function usesManagedEffort(model: Model<Api>): boolean {
++  // This host capability was added after the minimum supported Pi type version.
++  return (model.compat as { supportsMidConvoEffort?: boolean } | undefined)?.supportsMidConvoEffort === true;
++}
++
++function resolveAnthropicEffort(model: Model<Api>, level: SimpleStreamOptions["reasoning"]): AnthropicEffort {
++  const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
++  if (isAnthropicEffort(mapped)) return mapped;
++  if (level === "minimal" || level === "low") return "low";
++  return level === "medium" ? "medium" : "high";
++}
+ 
+ // ---------------------------------------------------------------------------
+ // Cache keepalive: with PI_CACHE_RETENTION=long (1h TTL), replay the exact last
+@@ -108,7 +130,9 @@
+   payload: AnthropicKeepalivePayload,
+   signal: AbortSignal,
+ ): Promise<KeepalivePingResult> {
+-  const stream = await payload.client.messages.create(payload.params, { signal });
++  // The SDK's older declarations omit adaptive thinking and system effort turns;
++  // request construction above owns those typed wire fields.
++  const stream = await payload.client.messages.create(payload.params as MessageCreateParamsStreaming, { signal });
+   for await (const event of stream) {
+     if (event.type !== "message_start") continue;
+     const usage = event.message.usage as unknown as {
+@@ -228,6 +252,7 @@
+   isOAuth: boolean,
+   options?: SimpleStreamOptions,
+   serverSideFallback = false,
++  managedEffort = false,
+ ): Record<string, string> {
+   const headers: Record<string, string> = {
+     accept: "application/json",
+@@ -245,6 +270,10 @@
+     headers["x-app"] = "cli";
+   }
+   if (serverSideFallback) betas.add(SERVER_SIDE_FALLBACK_BETA);
++  if (managedEffort) {
++    betas.add("mid-conversation-output-config-2026-07-01");
++    betas.add("thinking-binding-controls-2026-08-01");
++  }
+ 
+   if (options?.headers) {
+     for (const [key, value] of Object.entries(options.headers)) {
+@@ -282,9 +311,11 @@
+   isOAuth: boolean,
+ ): Promise<AnthropicRequestParams> {
+   const maxTokens = options?.maxTokens || Math.floor(model.maxTokens / 3);
++  const managedEffort = usesManagedEffort(model);
++  const effort = resolveAnthropicEffort(model, options?.reasoning);
+   let params: AnthropicRequestParams = {
+     model: model.id,
+-    messages: convertPiMessagesToAnthropic(context.messages, isOAuth, model),
++    messages: convertPiMessagesToAnthropic(context.messages, isOAuth, model, managedEffort ? effort : undefined),
+     max_tokens: maxTokens,
+     stream: true,
+   };
+@@ -295,7 +326,19 @@
+     params.tools = convertPiToolsToAnthropic(context.tools, isOAuth);
+   }
+ 
+-  if (options?.reasoning && model.reasoning && maxTokens > 1) {
++  if (managedEffort) {
++    // Match Pi's managed-effort protocol: fixed request baseline, actual effort
++    // in the final system-role message, and safe handling of old signatures.
++    params.thinking = {
++      type: "adaptive", display: "summarized",
++      block_binding: { prefix_mismatch_behavior: "drop_block" },
++    };
++    params.output_config = { effort: "high" };
++  } else if (options?.reasoning && model.reasoning &&
++      (model.compat as { forceAdaptiveThinking?: boolean } | undefined)?.forceAdaptiveThinking === true) {
++    params.thinking = { type: "adaptive" };
++    params.output_config = { effort };
++  } else if (options?.reasoning && model.reasoning && maxTokens > 1) {
+     const defaultBudgets: Record<string, number> = {
+       minimal: 1024,
+       low: 4096,
+@@ -348,6 +391,9 @@
+       api: model.api,
+       provider: model.provider,
+       model: model.id,
++      ...(usesManagedEffort(model)
++        ? { providerThinkingLevel: resolveAnthropicEffort(model, options?.reasoning) }
++        : {}),
+       usage: {
+         input: 0,
+         output: 0,
+@@ -374,6 +420,7 @@
+         isOAuth,
+         options,
+         allowedFallbackModels.length > 0,
++        usesManagedEffort(model),
+       );
+ 
+       if (isOAuth) defaultHeaders.authorization = `Bearer ${apiKey}`;
+@@ -403,7 +450,7 @@
+       const providerRequestStartedAt = Date.now();
+       const { data: anthropicStream, response: httpResponse } =
+         await client.messages
+-          .create(params, {
++          .create(params as MessageCreateParamsStreaming, {
+             signal: options?.signal,
+           })
+           .withResponse();
+--- a/test/cache-policy.test.mjs
++++ b/test/cache-policy.test.mjs
+@@ -88,6 +88,12 @@
+     const headers = makeDefaultHeaders(true);
+     assert.match(headers["anthropic-beta"], /extended-cache-ttl-2025-04-11/);
+   });
++});
++
++test("OAuth headers use a Claude Code version accepted by Fable 5.1", () => {
++  // Regression: 2.1.97 receives claude_code_version_too_old (minimum 2.1.251).
++  assert.equal(makeDefaultHeaders(true)["user-agent"], "claude-code/2.1.261");
++  assert.equal(makeDefaultHeaders(false)["user-agent"], undefined);
+ });
+ 
+ test("header merge preserves required betas and rejects fine-grained streaming", () => {
+@@ -363,6 +369,7 @@
+   assert.equal(requestBody.speed, "fast");
+   assert.deepEqual(requestBody.tool_choice, { type: "none" });
+   assert.deepEqual(requestBody.fallbacks, [{ model: "claude-opus-4-8" }]);
++  assert.equal(requestHeaders.get("user-agent"), "claude-code/2.1.261");
+   const betas = new Set(requestHeaders.get("anthropic-beta").split(","));
+   assert.equal(betas.has("server-side-fallback-2026-07-01"), true);
+   assert.equal(betas.has("fast-mode-2026-02-01"), true);
+@@ -482,8 +489,7 @@
+       providerConfig = config;
+     },
+     on(event, callback) {
+-      assert.equal(event, "session_shutdown");
+-      shutdown = callback;
++      if (event === "session_shutdown") shutdown = callback;
+     },
+   };
+ 
+@@ -498,8 +504,7 @@
+   let cancellations = 0;
+   const pi = {
+     on(event, callback) {
+-      assert.equal(event, "session_shutdown");
+-      handler = callback;
++      if (event === "session_shutdown") handler = callback;
+     },
+   };
+ 
+@@ -509,6 +514,20 @@
+   assert.equal(typeof handler, "function");
+   handler();
+   assert.equal(cancellations, 1);
++});
++
++test("provider switches cancel keepalive only when leaving Anthropic", () => {
++  const handlers = new Map();
++  let cancellations = 0;
++  registerCacheShutdown({ on: (event, callback) => handlers.set(event, callback) }, () => cancellations++);
++  const select = handlers.get("model_select");
++  assert.equal(typeof select, "function");
++  select({ model: { provider: "anthropic" }, source: "set" });
++  assert.equal(cancellations, 0);
++  for (const source of ["set", "cycle", "restore"]) {
++    select({ model: { provider: "openai-codex" }, source });
++  }
++  assert.equal(cancellations, 3);
+ });
+ 
+ test("one-hour writes use two-times input pricing", () => {
+--- /dev/null
++++ b/test/thinking.test.mjs
+@@ -0,0 +1,117 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { convertPiMessagesToAnthropic } from "../.test-dist/src/convert.js";
++import { makeDefaultHeaders, prepareAnthropicRequest, streamAnthropicOAuth } from "../.test-dist/src/stream.js";
++
++const model = (overrides = {}) => ({
++  id: "claude-fable-5-1", name: "Claude Fable 5.1", api: "anthropic-messages",
++  provider: "anthropic", baseUrl: "https://api.anthropic.com", reasoning: true,
++  input: ["text"], contextWindow: 200_000, maxTokens: 65_536,
++  cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
++  thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
++  compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true },
++  ...overrides,
++});
++const user = (text = "Review this synthetic plan.") => ({
++  role: "user", content: [{ type: "text", text }], timestamp: 0,
++});
++const context = { systemPrompt: "Synthetic test", messages: [user()] };
++const effortMessage = (effort) => ({ role: "system", content: [], output_config: { effort } });
++
++test("managed Fable medium uses native turn effort, not a thinking budget", async () => {
++  const params = await prepareAnthropicRequest(model(), context, { reasoning: "medium" }, true);
++  assert.deepEqual(params.thinking, {
++    type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" },
++  });
++  // Pi's managed-effort protocol keeps a stable high baseline and sets the active
++  // turn's actual effort in the final system-role output_config message.
++  assert.deepEqual(params.output_config, { effort: "high" });
++  assert.deepEqual(params.messages.at(-1), effortMessage("medium"));
++  assert.equal("budget_tokens" in params.thinking, false);
++});
++
++test("managed effort honors supported level mappings and defaults to high", async () => {
++  for (const [reasoning, expected] of [["minimal", "low"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"], [undefined, "high"]]) {
++    const params = await prepareAnthropicRequest(model(), context, { reasoning }, true);
++    assert.deepEqual(params.messages.at(-1), effortMessage(expected));
++  }
++});
++
++test("ordinary adaptive models set native request effort without managed messages", async () => {
++  const params = await prepareAnthropicRequest(model({ compat: { forceAdaptiveThinking: true } }), context,
++    { reasoning: "medium", thinkingBudgets: { medium: 1 } }, true);
++  assert.deepEqual(params.thinking, { type: "adaptive" });
++  assert.deepEqual(params.output_config, { effort: "medium" });
++  assert.equal(params.messages.some(m => m.role === "system"), false);
++});
++
++test("legacy models retain budget-based thinking and no native effort", async () => {
++  const params = await prepareAnthropicRequest(model({ compat: {} }), context,
++    { reasoning: "medium", maxTokens: 16_384 }, true);
++  assert.deepEqual(params.thinking, { type: "enabled", budget_tokens: 10_240 });
++  assert.equal(params.output_config, undefined);
++  assert.equal(params.messages.some(m => m.role === "system"), false);
++  const plain = await prepareAnthropicRequest(model({ reasoning: false, compat: {} }), context, { reasoning: "medium" }, true);
++  assert.equal(plain.thinking, undefined);
++});
++
++test("managed conversion preserves historical effort and the user cache breakpoint", () => {
++  const assistant = {
++    role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "claude-fable-5-1",
++    providerThinkingLevel: "high", content: [{ type: "text", text: "Earlier review" }], stopReason: "stop", timestamp: 1,
++  };
++  const messages = convertPiMessagesToAnthropic([user(), assistant, user("Review the revision.")], true, model(), "medium");
++  assert.deepEqual(messages.map(m => m.role), ["user", "system", "assistant", "user", "system"]);
++  assert.deepEqual(messages[1], effortMessage("high"));
++  assert.ok(messages.at(-2).content.at(-1).cache_control);
++  assert.deepEqual(messages.at(-1), effortMessage("medium"));
++  for (const override of [{ provider: "openai-codex" }, { providerThinkingLevel: "invalid" }, { stopReason: "error" }]) {
++    const converted = convertPiMessagesToAnthropic([user(), { ...assistant, ...override }, user()], true, model(), "medium");
++    assert.deepEqual(converted.filter(m => m.role === "system"), [effortMessage("medium")]);
++  }
++});
++
++test("managed effort adds required betas without re-enabling fine-grained streaming", () => {
++  const ordinary = makeDefaultHeaders(true)["anthropic-beta"];
++  const managed = makeDefaultHeaders(true, {
++    headers: { "anthropic-beta": "caller-beta,fine-grained-tool-streaming-2025-05-14" },
++  }, false, true)["anthropic-beta"].split(",");
++  for (const beta of ["mid-conversation-output-config-2026-07-01", "thinking-binding-controls-2026-08-01"]) {
++    assert.ok(managed.includes(beta));
++    assert.equal(ordinary.includes(beta), false);
++  }
++  assert.ok(managed.includes("caller-beta"));
++  assert.equal(managed.includes("fine-grained-tool-streaming-2025-05-14"), false);
++});
++
++test("managed effort reaches the wire and is recorded for future replay", async () => {
++  let body, headers;
++  const response = await streamAnthropicOAuth(model(), context, {
++    apiKey: "sk-ant-oat-test", reasoning: "medium",
++    onPayload(params) {
++      assert.deepEqual(params.messages.at(-1), effortMessage("medium"));
++      return { ...params, speed: "fast" };
++    },
++    async fetch(input, init) {
++      const request = input instanceof Request ? input : new Request(input, init);
++      body = JSON.parse(await request.clone().text());
++      headers = request.headers;
++      const events = [
++        { type: "message_start", message: { id: "msg_medium", type: "message", role: "assistant", model: "claude-fable-5-1", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } },
++        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
++        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Synthetic review" } },
++        { type: "content_block_stop", index: 0 },
++        { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 2 } },
++        { type: "message_stop" },
++      ];
++      return new Response(events.map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), {
++        status: 200, headers: { "content-type": "text/event-stream" },
++      });
++    },
++  }).result();
++  assert.equal(response.stopReason, "stop");
++  assert.equal(response.providerThinkingLevel, "medium");
++  assert.equal(body.speed, "fast");
++  assert.deepEqual(body.messages.at(-1), effortMessage("medium"));
++  assert.match(headers.get("anthropic-beta"), /mid-conversation-output-config-2026-07-01/);
++});

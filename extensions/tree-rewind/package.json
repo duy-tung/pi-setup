@@ -1,6 +1,6 @@
 {
   "name": "pi-tree-rewind",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "description": "Worktree checkpoints for Pi backed by shadow git repos: rewind code and/or conversation from any node in the session tree. Not the project's own git.",
   "license": "MIT",
   "author": "duytung160596",
@@ -13,7 +13,17 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/backend-test.mts",
+    "test": "npm run test:backend && npm run test:preimages && npm run test:recovery-storage && npm run test:retention && npm run test:recovery && npm run test:operations && npm run test:review && npm run test:ux && npm run test:line-stats && npm run test:targets",
+    "test:backend": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/backend-test.mts",
+    "test:preimages": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/preimage-test.mts",
+    "test:recovery-storage": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/recovery-storage-test.mts",
+    "test:retention": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/retention-test.mts",
+    "test:recovery": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/recovery-test.mts",
+    "test:review": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/review-regression-test.mts",
+    "test:operations": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/operations-test.mts",
+    "test:ux": "node --import ./spike/register.mjs spike/ux-contract-test.mts",
+    "test:line-stats": "node --import ./spike/register.mjs spike/line-stats-test.mts",
+    "test:targets": "node --import ./spike/register.mjs spike/target-safety-test.mts",
     "test:hazards": "bash spike/hazards.sh && bash spike/hazards2.sh",
     "bench": "HOME=$(mktemp -d) node --import ./spike/register.mjs spike/perf-test.mts",
     "spike": "node spike/shadow-git-spike.mjs"
@@ -24,6 +34,6 @@
     ]
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.4"
+    "@earendil-works/pi-coding-agent": "0.85.1"
   }
 }

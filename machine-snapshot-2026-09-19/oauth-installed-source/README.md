@@ -1,0 +1,142 @@
+# pi-anthropic-oauth-plus
+
+[pi-anthropic-oauth](https://www.npmjs.com/package/pi-anthropic-oauth) (Claude
+Pro/Max OAuth for [pi](https://github.com/badlogic/pi-mono), MIT, by leohenon)
+plus prompt-cache upgrades. The first commit is the pristine upstream 0.2.4;
+everything on top is this repo's work — see the diff.
+
+## What's added
+
+### Local Fable 5.1 compatibility patch (2026-09-06)
+
+This checkout is based on v0.3.2 with a checksum-pinned compatibility patch
+reproduced by pi-setup.
+OAuth inference now sends `claude-code/2.1.261`, matching the installed official
+Claude Code release. The previous `2.1.97` header receives HTTP 400
+`claude_code_version_too_old` for `claude-fable-5-1`; that route requires at least
+`2.1.251`. Login credentials, payload construction, and cache behavior are unchanged.
+Header and mocked wire-request tests cover this regression. This static version is
+not auto-discovered or updated; future provider version requirements may need another
+reviewed update.
+
+pi-setup applies and verifies the patch over its pinned Git package rather than
+relying on a machine-specific local package path. No release has been published or
+pushed. Keepalive cancellation now also runs when switching away from Anthropic;
+it clears pending timers, aborts pings and invalidates late request completions.
+
+### Native thinking effort (local patch, 2026-09-06)
+
+Adaptive models now use native effort instead of the legacy token-budget mapping.
+Fable 5.1 declares `supportsMidConvoEffort`; following Pi 0.85.1, its requests carry
+both managed-effort betas, adaptive thinking with prefix-mismatch block handling,
+and system-role `output_config` messages for historical and current effort. The
+request-level baseline remains `high`; the final effort message selects the actual
+next-turn level, such as `medium`. Responses retain `providerThinkingLevel` so a
+later request can replay the original effort. The last user cache breakpoint stays
+before the appended current-effort message.
+
+Other `forceAdaptiveThinking` models use request-level native effort. Older models
+keep their existing budget-based thinking. These wire additions are typed locally
+because the pinned Anthropic SDK predates them; no dependency upgrade is required.
+The new `test/thinking.test.mjs` covers native medium, level mappings, historical
+replay, legacy behavior, required headers and the actual serialized request.
+
+### Pi 0.84.3 provider compatibility
+
+- honors Pi's `onPayload` replacement hook, so request-body extensions such as
+  `speed: "fast"` reach Anthropic;
+- maps provider-neutral `toolChoice` and declares OAuth as subscription-backed;
+- sends configured server-side fallback models and prices usage against the
+  model Anthropic actually returns;
+- merges caller beta headers with the required OAuth/interleaved/long-cache
+  betas instead of replacing them;
+- always removes fine-grained tool streaming because its raw partial JSON can
+  corrupt large edit arguments.
+
+### 1-hour cache TTL (`PI_CACHE_RETENTION=long`)
+
+Upstream hardcodes `cache_control: { type: "ephemeral" }` (5-minute TTL), so
+returning to a session after >5 minutes re-bills the whole prompt. With
+`PI_CACHE_RETENTION=long` this fork sends `ttl: "1h"` on every cache
+breakpoint plus the `extended-cache-ttl-2025-04-11` beta. Measured on real
+usage: ~76% of cache misses eliminated (most idle gaps are 5–30 min).
+
+### Cache keepalive (replay-and-abort)
+
+Even 1h dies over lunch. After each successful turn the extension targets a
+ping 55 minutes after the provider request **started**: it re-sends the exact
+same request object and stops after `message_start`. A confirmed cache read
+refreshes the TTL for another hour. Guards:
+
+- exact replay only (same client, tools, system, messages, and thinking config);
+- request-start TTL accounting, matching Anthropic's documented semantics;
+- capped at `PI_CACHE_KEEPALIVE` pings (default 6, up to ~6.5h total coverage;
+  `0` disables);
+- only a positive `cache_read_input_tokens` result rearms the next ping;
+- expiry, provider errors, zero cache reads, real requests, reload, session
+  switch, and shutdown all stop and abort pending work;
+- stale request/ping completions cannot replace or cancel newer state;
+- prompts under 10k tokens are skipped;
+- out-of-band: nothing is emitted to pi, so ping usage is also absent from Pi's
+  session/footer cost totals;
+- timers are `unref()`ed so oneshot `pi -p` processes exit normally.
+
+Extra knobs: `PI_CACHE_KEEPALIVE_DELAY_MS`, `PI_CACHE_KEEPALIVE_DEBUG=1`.
+Debug output is capped at 64 KiB in the private
+`~/.pi/agent/cache/cache-keepalive.log` file (or the configured Pi directory).
+The delay override must remain below the 1-hour TTL, and the ping override is
+capped at 24; invalid values fall back to the safe defaults.
+
+### `cacheWrite1h` usage accounting
+
+Parses `cache_creation.ephemeral_1h_input_tokens` into `usage.cacheWrite1h`,
+so you can verify from the session file that 1h writes actually happen.
+
+## Install
+
+```bash
+pi remove npm:pi-anthropic-oauth        # if the upstream package is installed
+pi install git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2
+export PI_CACHE_RETENTION=long          # e.g. in ~/.zshenv
+```
+
+Version 0.3.2 requires Pi 0.84.3 or newer.
+
+### Prompt-rewrite compatibility alias
+
+The upstream provider's aggressive identity rewrite can transform
+`~/.pi/agent` text in the system prompt into `~/.Claude Code/agent`. On a new
+installation this fork creates a private `~/.Claude Code` directory containing
+only `agent -> ~/.pi/agent`; it does not alias the entire `~/.pi` state tree.
+An existing upstream-style `~/.Claude Code -> ~/.pi` symlink is left untouched
+rather than rewritten or deleted silently.
+
+## Cost model and operating boundary
+
+- 1h cache writes cost 2× base input (vs 1.25× for 5m); reads stay 0.1×.
+- Each keepalive ping costs one cache read of the prompt. It is generally worth
+  extending a large live conversation through lunch or an afternoon break, but
+  not indefinitely warming an abandoned session.
+- Six pings cover about 390 minutes from the real request start. Sleep, Pi
+  restart, OAuth/network failure, provider eviction, or a longer gap can still
+  produce a legitimate miss.
+- For overnight or >6h breaks, use Pi's `/compact`, a handoff, or a new session
+  instead of increasing keepalive toward 24 hours.
+- Pi's `Cache miss after … idle` label compares visible assistant-request
+  timestamps and does not know about these out-of-band pings.
+
+## Development
+
+```bash
+npm install
+npm run check
+npm test
+npm run pack:check
+```
+
+Tests use a fake clock and fake provider; they do not wait for real TTLs or make
+model requests.
+
+## License
+
+MIT — upstream copyright leohenon, modifications copyright duy-tung.

@@ -38,6 +38,30 @@ const forbiddenRoot = new Set([
   "backups",
 ]);
 const allowedFakeTokens = new Set(["ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"]);
+const credentialPatterns = [
+  { label: "Anthropic OAuth access token", re: /sk-ant-oat01-[A-Za-z0-9_-]{20,}/g },
+  { label: "Anthropic OAuth refresh token", re: /sk-ant-ort01-[A-Za-z0-9_-]{20,}/g },
+  { label: "Anthropic API key", re: /sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}/g },
+  { label: "Codex refresh token", re: /rt\.1\.[A-Za-z0-9_-]{40,}/g },
+  { label: "JWT", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
+  { label: "Bearer token", re: /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi },
+  { label: "Context7 key", re: /ctx7sk-[0-9a-fA-F-]{20,}/g },
+  { label: "GitHub token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}/g },
+  { label: "GitHub PAT", re: /\bgithub_pat_[A-Za-z0-9_]{20,}/g },
+  { label: "AWS access key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+  { label: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  { label: "OpenAI project key", re: /\bsk-proj-[A-Za-z0-9_-]{20,}/g },
+  { label: "OpenAI service key", re: /\bsk-svcacct-[A-Za-z0-9_-]{20,}/g },
+  { label: "legacy OpenAI key", re: /\bsk-[A-Za-z0-9_-]{32,}/g },
+  { label: "Stripe secret key", re: /\bsk_live_[A-Za-z0-9_-]{20,}/g },
+  { label: "Google OAuth token", re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
+  { label: "xAI key", re: /\bxai-[A-Za-z0-9_-]{20,}/g },
+  { label: "Hugging Face token", re: /\bhf_[A-Za-z0-9]{20,}/g },
+  { label: "npm token", re: /\bnpm_[A-Za-z0-9]{20,}/g },
+  { label: "GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}/g },
+  { label: "Tavily key", re: /\btvly-[A-Za-z0-9_-]{20,}/g },
+];
 const failures = [];
 const files = [];
 
@@ -100,12 +124,14 @@ for (const { path, rel } of files) {
   if (text.includes(`${currentHome}/`) || homes.some((name) => !placeholderHomes.has(name.toLowerCase()))) {
     fail(`machine-specific home path found in ${rel}`);
   }
-  if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(text)) {
+  if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/.test(text)) {
     fail(`private-key material found in ${rel}`);
   }
-  const candidates = text.match(/(?:gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})/g) ?? [];
-  for (const candidate of candidates) {
-    if (!allowedFakeTokens.has(candidate)) fail(`credential-like token found in ${rel}`);
+  for (const { label, re } of credentialPatterns) {
+    const candidates = text.match(re) ?? [];
+    for (const candidate of candidates) {
+      if (!allowedFakeTokens.has(candidate)) fail(`credential-like token (${label}) found in ${rel}`);
+    }
   }
 }
 
@@ -128,13 +154,22 @@ const settings = JSON.parse(readFileSync(join(root, "settings.json"), "utf8"));
 const expectedNpm = ["mise", "--no-config", "exec", "node@24.15.0", "--", "npm"];
 const expectedPackages = [
   "git:github.com/duy-tung/pi-anthropic-oauth-plus@v0.3.2",
-  "npm:pi-web-search@1.3.1",
-  { source: "npm:@upstash/context7-pi@0.1.2", skills: [] },
+  "npm:pi-web-search@1.4.0",
+  "npm:@upstash/context7-pi@0.1.2",
+  "npm:@juicesharp/rpiv-ask-user-question@2.9.0",
+  "npm:@juicesharp/rpiv-todo@2.9.0",
+  "npm:@tintinweb/pi-subagents@0.19.0",
+  "npm:pi-zentui@0.22.3",
+  "npm:@juicesharp/rpiv-advisor@2.9.0",
+  { source: "npm:pi-background-tasks@2.5.0", extensions: ["extensions/background-tasks.ts"] },
+  "npm:@firstpick/pi-themes-bundle@0.1.6",
 ];
 const expectedDefaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(settings.npmCommand) !== JSON.stringify(expectedNpm)) fail("settings.json npmCommand is not portable and pinned");
 if (JSON.stringify(settings.packages) !== JSON.stringify(expectedPackages)) fail("settings.json package list is not exactly pinned");
 if (JSON.stringify(settings.defaultTools) !== JSON.stringify(expectedDefaultTools)) fail("settings.json default tool list is not exactly pinned");
+const zentui = JSON.parse(readFileSync(join(root, "zentui.json"), "utf8"));
+if (zentui.components?.footer?.style !== "native") fail("Zentui must preserve the custom statusline with native footer mode");
 const mise = readFileSync(join(root, "mise.toml"), "utf8");
 if (
   !/^node = "24\.15\.0"$/m.test(mise)
@@ -145,13 +180,13 @@ if (
 }
 
 const managed = readFileSync(join(root, "scripts", "managed-paths.txt"), "utf8").trim().split("\n");
-const expectedManaged = ["AGENTS.md", "settings.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts"];
+const expectedManaged = ["AGENTS.md", "settings.json", "zentui.json", "scrub-session-secrets.sh", "extensions", "skills", "prompts", "agents"];
 if (JSON.stringify(managed) !== JSON.stringify(expectedManaged)) fail("managed-path allowlist changed unexpectedly");
 
 const rewind = lstatSync(join(root, "extensions", "tree-rewind"));
 if (!rewind.isDirectory() || rewind.isSymbolicLink()) fail("tree-rewind must be a bundled regular directory");
 const rewindPackage = JSON.parse(readFileSync(join(root, "extensions", "tree-rewind", "package.json"), "utf8"));
-if (rewindPackage.name !== "pi-tree-rewind" || rewindPackage.version !== "0.3.1") fail("unexpected bundled tree-rewind package metadata");
+if (rewindPackage.name !== "pi-tree-rewind" || rewindPackage.version !== "0.4.1") fail("unexpected bundled tree-rewind package metadata");
 
 if (failures.length > 0) {
   for (const message of [...new Set(failures)]) console.error(`audit: ${message}`);
